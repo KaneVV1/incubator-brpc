@@ -16,6 +16,7 @@ brpc depends on following packages:
 * [Fedora/CentOS](#fedoracentos)
 * [Linux with self-built deps](#linux-with-self-built-deps)
 * [MacOS](#macos)
+* [Docker](#docker)
 
 ## Ubuntu/LinuxMint/WSL
 ### Prepare deps
@@ -105,6 +106,18 @@ Examples link brpc statically, if you need to link the shared version, remove `C
 
 ```shell
 $ mkdir build && cd build && cmake -DBUILD_UNIT_TESTS=ON .. && make && make test
+```
+
+### Compile brpc with vcpkg
+
+[vcpkg](https://github.com/microsoft/vcpkg) is a package manager that supports all platforms,
+you can use vcpkg to build brpc with the following step:
+
+```shell
+$ git clone https://github.com/microsoft/vcpkg.git
+$ ./bootstrap-vcpkg.bat # for powershell
+$ ./bootstrap-vcpkg.sh # for bash
+$ ./vcpkg install brpc
 ```
 
 ## Fedora/CentOS
@@ -224,6 +237,19 @@ Note: With same environment, the performance of the MacOS version is worse than 
 ### Apple Silicon
 
 The code at master HEAD already supports M1 series chips. M2 series are not tested yet. Please feel free to report remaining warnings/errors to us by issues.
+
+## Docker
+Compile brpc with docker:
+
+```shell
+$ mkdir -p ~/brpc
+$ cd ~/brpc
+$ git clone https://github.com/apache/incubator-brpc.git
+$ cd incubator-brpc
+$ docker build -t brpc:master .
+$ docker images
+$ docker run -it brpc:master /bin/bash
+```
 
 ### Prepare deps
 

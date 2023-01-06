@@ -48,6 +48,8 @@
 #include "brpc/policy/rtmp_protocol.h"  // FIXME
 #include "brpc/periodic_task.h"
 #include "brpc/details/health_check.h"
+#include "brpc/rdma/rdma_endpoint.h"
+#include "brpc/rdma/rdma_helper.h"
 #if defined(OS_MACOSX)
 #include <sys/event.h>
 #endif
@@ -82,6 +84,10 @@ DEFINE_int32(ssl_bio_buffer_size, 16*1024, "Set buffer size for SSL read/write")
 DEFINE_int64(socket_max_unwritten_bytes, 64 * 1024 * 1024,
              "Max unwritten bytes in each socket, if the limit is reached,"
              " Socket.Write fails with EOVERCROWDED");
+
+DEFINE_int64(socket_max_streams_unconsumed_bytes, 0,
+             "Max stream receivers' unconsumed bytes in one socket,"
+             " it used in stream for receiver buffer control.");
 
 DEFINE_int32(max_connection_pool_size, 100,
              "Max number of pooled connections to a single endpoint");
@@ -442,6 +448,8 @@ Socket::Socket(Forbidden)
     , _auth_context(NULL)
     , _ssl_state(SSL_UNKNOWN)
     , _ssl_session(NULL)
+    , _rdma_ep(NULL)
+    , _rdma_state(RDMA_OFF)
     , _connection_type_for_progressive_read(CONNECTION_TYPE_UNKNOWN)
     , _controller_released_socket(false)
     , _overcrowded(false)
@@ -455,6 +463,7 @@ Socket::Socket(Forbidden)
     , _epollout_butex(NULL)
     , _write_head(NULL)
     , _stream_set(NULL)
+    , _total_streams_unconsumed_size(0)
     , _ninflight_app_health_check(0)
 {
     CreateVarsOnce();
@@ -630,6 +639,22 @@ int Socket::Create(const SocketOptions& options, SocketId* id) {
     m->_ssl_state = (options.initial_ssl_ctx == NULL ? SSL_OFF : SSL_UNKNOWN);
     m->_ssl_session = NULL;
     m->_ssl_ctx = options.initial_ssl_ctx;
+#if BRPC_WITH_RDMA
+    CHECK(m->_rdma_ep == NULL);
+    if (options.use_rdma) {
+        m->_rdma_ep = new (std::nothrow)rdma::RdmaEndpoint(m);
+        if (!m->_rdma_ep) {
+            const int saved_errno = errno;
+            PLOG(ERROR) << "Fail to create RdmaEndpoint";
+            m->SetFailed(saved_errno, "Fail to create RdmaEndpoint: %s",
+                         berror(saved_errno));
+            return -1;
+        }
+        m->_rdma_state = RDMA_UNKNOWN;
+    } else {
+        m->_rdma_state = RDMA_OFF;
+    }
+#endif
     m->_connection_type_for_progressive_read = CONNECTION_TYPE_UNKNOWN;
     m->_controller_released_socket.store(false, butil::memory_order_relaxed);
     m->_overcrowded = false;
@@ -640,6 +665,7 @@ int Socket::Create(const SocketOptions& options, SocketId* id) {
     m->_error_code = 0;
     m->_error_text.clear();
     m->_agent_socket_id.store(INVALID_SOCKET_ID, butil::memory_order_relaxed);
+    m->_total_streams_unconsumed_size.store(0, butil::memory_order_relaxed);
     m->_ninflight_app_health_check.store(0, butil::memory_order_relaxed);
     // NOTE: last two params are useless in bthread > r32787
     const int rc = bthread_id_list_init(&m->_id_wait_list, 512, 512);
@@ -709,6 +735,14 @@ int Socket::WaitAndReset(int32_t expected_nref) {
             g_vars->channel_conn << -1;
         }
     }
+
+#if BRPC_WITH_RDMA
+    if (_rdma_ep) {
+        _rdma_ep->Reset();
+        _rdma_state = RDMA_UNKNOWN;
+    }
+#endif
+
     _local_side = butil::EndPoint();
     if (_ssl_session) {
         SSL_free(_ssl_session);
@@ -1009,6 +1043,15 @@ void Socket::OnRecycle() {
             g_vars->channel_conn << -1;
         }
     }
+
+#if BRPC_WITH_RDMA
+    if (_rdma_ep) {
+        delete _rdma_ep;
+        _rdma_ep = NULL;
+        _rdma_state = RDMA_UNKNOWN;
+    }
+#endif
+
     reset_parsing_context(NULL);
     _read_buf.clear();
 
@@ -1283,6 +1326,11 @@ int Socket::ConnectIfNot(const timespec* abstime, WriteRequest* req) {
     }
     s.release();
     return 1;    
+}
+
+void Socket::WakeAsEpollOut() {
+    _epollout_butex->fetch_add(1, butil::memory_order_release);
+    bthread::butex_wake_except(_epollout_butex, 0);
 }
 
 int Socket::HandleEpollOut(SocketId id) {
@@ -1584,7 +1632,16 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
         butil::IOBuf* data_arr[1] = { &req->data };
         nw = _conn->CutMessageIntoFileDescriptor(fd(), data_arr, 1);
     } else {
-        nw = req->data.cut_into_file_descriptor(fd());
+#if BRPC_WITH_RDMA
+        if (_rdma_ep && _rdma_state != RDMA_OFF) {
+            butil::IOBuf* data_arr[1] = { &req->data };
+            nw = _rdma_ep->CutFromIOBufList(data_arr, 1);
+        } else {
+#else
+        {
+#endif
+            nw = req->data.cut_into_file_descriptor(fd());
+        }
     }
     if (nw < 0) {
         // RTMP may return EOVERCROWDED
@@ -1666,21 +1723,50 @@ void* Socket::KeepWrite(void* void_arg) {
         // Update(8/15/2017): Not working, performance downgraded.
         //if (nw <= 0 || req->data.empty()/*note*/) {
         if (nw <= 0) {
-            g_vars->nwaitepollout << 1;
-            bool pollin = (s->_on_edge_triggered_events != NULL);
             // NOTE: Waiting epollout within timeout is a must to force
             // KeepWrite to check and setup pending WriteRequests periodically,
             // which may turn on _overcrowded to stop pending requests from
             // growing infinitely.
             const timespec duetime =
                 butil::milliseconds_from_now(WAIT_EPOLLOUT_TIMEOUT_MS);
-            const int rc = s->WaitEpollOut(s->fd(), pollin, &duetime);
-            if (rc < 0 && errno != ETIMEDOUT) {
-                const int saved_errno = errno;
-                PLOG(WARNING) << "Fail to wait epollout of " << *s;
-                s->SetFailed(saved_errno, "Fail to wait epollout of %s: %s",
+#if BRPC_WITH_RDMA
+            if (s->_rdma_state == RDMA_ON) {
+                const int expected_val = s->_epollout_butex
+                    ->load(butil::memory_order_acquire);
+                CHECK(s->_rdma_ep != NULL);
+                if (!s->_rdma_ep->IsWritable()) {
+                    g_vars->nwaitepollout << 1;
+                    if (bthread::butex_wait(s->_epollout_butex,
+                            expected_val, &duetime) < 0) {
+                        if (errno != EAGAIN && errno != ETIMEDOUT) {
+                            const int saved_errno = errno;
+                            PLOG(WARNING) << "Fail to wait rdma window of " << *s;
+                            s->SetFailed(saved_errno, "Fail to wait rdma window of %s: %s",
+                                    s->description().c_str(), berror(saved_errno));
+                        }
+                        if (s->Failed()) {
+                            // NOTE:
+                            // Different from TCP, we cannot find the RDMA channel
+                            // failed by writing to it. Thus we must check if it
+                            // is already failed here.
+                            break;
+                        }
+                    }
+                }
+            } else {
+#else
+            {
+#endif
+                g_vars->nwaitepollout << 1;
+                bool pollin = (s->_on_edge_triggered_events != NULL);
+                const int rc = s->WaitEpollOut(s->fd(), pollin, &duetime);
+                if (rc < 0 && errno != ETIMEDOUT) {
+                    const int saved_errno = errno;
+                    PLOG(WARNING) << "Fail to wait epollout of " << *s;
+                    s->SetFailed(saved_errno, "Fail to wait epollout of %s: %s",
                              s->description().c_str(), berror(saved_errno));
-                break;
+                    break;
+                }
             }
         }
         if (NULL == cur_tail) {
@@ -1715,9 +1801,13 @@ ssize_t Socket::DoWrite(WriteRequest* req) {
         if (_conn) {
             return _conn->CutMessageIntoFileDescriptor(fd(), data_list, ndata);
         } else {
-            ssize_t nw = butil::IOBuf::cut_multiple_into_file_descriptor(
+#if BRPC_WITH_RDMA
+            if (_rdma_ep && _rdma_state != RDMA_OFF) {
+                return _rdma_ep->CutFromIOBufList(data_list, ndata);
+            }
+#endif
+            return butil::IOBuf::cut_multiple_into_file_descriptor(
                 fd(), data_list, ndata);
-            return nw;
         }
     }
 
@@ -1746,7 +1836,7 @@ ssize_t Socket::DoWrite(WriteRequest* req) {
         const unsigned long e = ERR_get_error();
         if (e != 0) {
             LOG(WARNING) << "Fail to write into ssl_fd=" << fd() <<  ": "
-                         << SSLError(ERR_get_error());
+                         << SSLError(e);
             errno = ESSL;
          } else {
             // System error with corresponding errno set
@@ -1789,6 +1879,7 @@ int Socket::SSLHandshake(int fd, bool server_mode) {
     // we use bthread_fd_wait as polling mechanism instead of EventDispatcher
     // as it may confuse the origin event processing code.
     while (true) {
+        ERR_clear_error();
         int rc = SSL_do_handshake(_ssl_session);
         if (rc == 1) {
             _ssl_state = SSL_CONNECTED;
@@ -1865,6 +1956,7 @@ ssize_t Socket::DoRead(size_t size_hint) {
     }
     // _ssl_state has been set
     if (ssl_state() == SSL_OFF) {
+        CHECK(_rdma_state == RDMA_OFF);
         return _read_buf.append_from_file_descriptor(fd(), size_hint);
     }
 
@@ -2149,6 +2241,8 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
        << "\nlogoff_flag=" << ptr->_logoff_flag.load(butil::memory_order_relaxed)
        << "\n_additional_ref_status="
        << ptr->_additional_ref_status.load(butil::memory_order_relaxed)
+       << "\ntotal_streams_buffer_size="
+       << ptr->_total_streams_unconsumed_size.load(butil::memory_order_relaxed)
        << "\nninflight_app_health_check="
        << ptr->_ninflight_app_health_check.load(butil::memory_order_relaxed)
        << "\nagent_socket_id=";
@@ -2227,6 +2321,11 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
            << "\n  advmss=" << ti.tcpi_advmss
            << "\n  reordering=" << ti.tcpi_reordering
            << "\n}";
+    }
+#endif
+#if BRPC_WITH_RDMA
+    if (ptr->_rdma_state == RDMA_ON && ptr->_rdma_ep) {
+        ptr->_rdma_ep->DebugInfo(os);
     }
 #endif
 }
@@ -2452,6 +2551,7 @@ int Socket::GetPooledSocket(SocketUniquePtr* pooled_socket) {
         opt.initial_ssl_ctx = _ssl_ctx;
         opt.keytable_pool = _keytable_pool;
         opt.app_connect = _app_connect;
+        opt.use_rdma =  (_rdma_ep) ? true : false;
         socket_pool = new SocketPool(opt);
         SocketPool* expected = NULL;
         if (!main_sp->socket_pool.compare_exchange_strong(
@@ -2495,6 +2595,10 @@ int Socket::ReturnToPool() {
     // - sp must be released after returning to pool because it owns pool
     _connection_type_for_progressive_read = CONNECTION_TYPE_UNKNOWN;
     _controller_released_socket.store(false, butil::memory_order_relaxed);
+    // Reset the write timestamp to make the returned connection live (longer)
+    // This is useful for using a fake Socket + SocketConnection impl. to integrate
+    // 3rd-party client into bRPC (like MySQL Client).
+    _last_writetime_us.store(butil::cpuwide_time_us(), butil::memory_order_relaxed);
     pool->ReturnSocket(this);
     sp->RemoveRefManually();
     return 0;
@@ -2548,6 +2652,7 @@ int Socket::GetShortSocket(SocketUniquePtr* short_socket) {
     opt.initial_ssl_ctx = _ssl_ctx;
     opt.keytable_pool = _keytable_pool;
     opt.app_connect = _app_connect;
+    opt.use_rdma =  (_rdma_ep) ? true : false;
     if (get_client_side_messenger()->Create(opt, &id) != 0 ||
         Socket::Address(id, short_socket) != 0) {
         return -1;
