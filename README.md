@@ -1,11 +1,11 @@
 [中文版](README_cn.md)
 
-[![Linux Build Status](https://github.com/apache/incubator-brpc/actions/workflows/ci-linux.yml/badge.svg)](https://github.com/apache/incubator-brpc/actions/workflows/ci-linux.yml)
-[![MacOs Build Status](https://github.com/apache/incubator-brpc/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/apache/incubator-brpc/actions/workflows/ci-macos.yml)
+[![Linux Build Status](https://github.com/apache/brpc/actions/workflows/ci-linux.yml/badge.svg)](https://github.com/apache/brpc/actions/workflows/ci-linux.yml)
+[![MacOs Build Status](https://github.com/apache/brpc/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/apache/brpc/actions/workflows/ci-macos.yml)
 
 # ![brpc](docs/images/logo.png)
 
-brpc is an Industrial-grade RPC framework using C++ Language, which is often used in  high performance system such as Search, Storage, Machine learning, Advertisement, Recommendation etc.
+[brpc](https://brpc.apache.org/) is an Industrial-grade RPC framework using C++ Language, which is often used in  high performance system such as Search, Storage, Machine learning, Advertisement, Recommendation etc.
 
 ### "brpc" means "better RPC". 
 
@@ -102,7 +102,7 @@ You can use it to:
 Please refer to [here](CONTRIBUTING.md).
 
 # Feedback and Getting involved
-* Report bugs, ask questions or give suggestions by [Github Issues](https://github.com/apache/incubator-brpc/issues)
+* Report bugs, ask questions or give suggestions by [Github Issues](https://github.com/apache/brpc/issues)
 * Subscribe mailing list(dev-subscribe@brpc.apache.org) to get updated with the project
 
 # Code of Conduct

@@ -26,8 +26,9 @@ namespace policy {
 class TimeoutConcurrencyLimiter : public ConcurrencyLimiter {
    public:
     TimeoutConcurrencyLimiter();
+    explicit TimeoutConcurrencyLimiter(const TimeoutConcurrencyConf& conf);
 
-    bool OnRequested(int, Controller* cntl) override;
+    bool OnRequested(int current_concurrency, Controller* cntl) override;
 
     void OnResponded(int error_code, int64_t latency_us) override;
 
@@ -66,6 +67,8 @@ class TimeoutConcurrencyLimiter : public ConcurrencyLimiter {
     BAIDU_CACHELINE_ALIGNMENT butil::atomic<int64_t> _last_sampling_time_us;
     butil::Mutex _sw_mutex;
     SampleWindow _sw;
+    int64_t _timeout_ms;
+    int _max_concurrency;
 };
 
 }  // namespace policy

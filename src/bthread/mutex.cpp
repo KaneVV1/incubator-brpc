@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// bthread - A M:N threading library to make applications more concurrent.
+// bthread - An M:N threading library to make applications more concurrent.
 
 // Date: Sun Aug  3 12:46:15 CST 2014
 
@@ -405,26 +405,13 @@ static pthread_once_t init_sys_mutex_lock_once = PTHREAD_ONCE_INIT;
 // Call _dl_sym which is a private function in glibc to workaround the malloc
 // causing deadlock temporarily. This fix is hardly portable.
 
-/* refer dlsym implement
- * https://codebrowser.dev/glibc/glibc/dlfcn/dlsym.c.html#78
- * void *
- * ___dlsym (void *handle, const char *name)
- * {
- *   return __dlsym (handle, name, RETURN_ADDRESS (0));
- *   }
- *
- */
-
-#define RETURN_ADDRESS(nr) \
-    __builtin_extract_return_addr (__builtin_return_address (nr) )
-
 static void init_sys_mutex_lock() {
 #if defined(OS_LINUX)
     // TODO: may need dlvsym when GLIBC has multiple versions of a same symbol.
     // http://blog.fesnel.com/blog/2009/08/25/preloading-with-multiple-symbol-versions
     if (_dl_sym) {
-        sys_pthread_mutex_lock = (MutexOp)_dl_sym(RTLD_NEXT, "pthread_mutex_lock", RETURN_ADDRESS (0));
-        sys_pthread_mutex_unlock = (MutexOp)_dl_sym(RTLD_NEXT, "pthread_mutex_unlock", RETURN_ADDRESS (0));
+        sys_pthread_mutex_lock = (MutexOp)_dl_sym(RTLD_NEXT, "pthread_mutex_lock", (void*)init_sys_mutex_lock);
+        sys_pthread_mutex_unlock = (MutexOp)_dl_sym(RTLD_NEXT, "pthread_mutex_unlock", (void*)init_sys_mutex_lock);
     } else {
         // _dl_sym may be undefined reference in some system, fallback to dlsym
         sys_pthread_mutex_lock = (MutexOp)dlsym(RTLD_NEXT, "pthread_mutex_lock");
@@ -653,7 +640,7 @@ inline int mutex_lock_contended(bthread_mutex_t* m) {
     while (whole->exchange(BTHREAD_MUTEX_CONTENDED) & BTHREAD_MUTEX_LOCKED) {
         if (bthread::butex_wait(whole, BTHREAD_MUTEX_CONTENDED, NULL) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR/*note*/) {
-            // a mutex lock should ignore interrruptions in general since
+            // a mutex lock should ignore interruptions in general since
             // user code is unlikely to check the return value.
             return errno;
         }

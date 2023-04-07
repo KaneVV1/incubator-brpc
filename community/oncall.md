@@ -20,6 +20,7 @@
   * 蔡道进 @cdjingit
   * 何磊 @TousakaRin
   * 刘帅 @serverglen
+  * 胡希国 @Huixxi
 
 ## 5. 值周记录如下
 
@@ -59,3 +60,11 @@
 | 12/05/2022 - 12/11/2022  | 王伟冰 | https://lists.apache.org/thread/99o15h9hk5dd73jv8wyp49l8mbw0j611
 | 12/19/2022 - 12/25/2022  | 何磊 | https://lists.apache.org/thread/g1stjjo1mc9ds47do6gosrw5k6wwb9mj
 | 12/26/2022 - 01/01/2023  | 刘帅 | https://lists.apache.org/thread/3xw1gkobqmvr6oo375x3gsfcqvg80n23
+| 01/02/2023 - 01/08/2023  | 朱佳顺 | https://lists.apache.org/thread/sm4f209c8ltols04gpmzo386b02dyc9s
+| 01/09/2023 - 01/15/2023  | 李磊 | https://lists.apache.org/thread/fydjz4h88omsrb7fzw65wl64kh5r520s
+| 01/16/2023 - 01/29/2023  | 王伟冰 | https://lists.apache.org/thread/k5bb4pn2v23dksmwpwqphzlc4bd92ndr
+| 01/30/2023 - 02/05/2023  | 蔡道进 | https://lists.apache.org/thread/4scwpdh163l92czm5pvc7ox78n44mrn4
+| 02/13/2023 - 02/19/2023  | 刘帅 | https://lists.apache.org/thread/jwynp880hdhcfkqwq7thsm05y037wzy5
+| 02/27/2023 - 03/05/2023  | 李磊 | https://lists.apache.org/thread/94ndftsvooydfnn8hdddv294pp0tfvdm
+| 03/06/2023 - 03/12/2023  | 王伟冰 | https://lists.apache.org/thread/bv3qw5w8gj9xs576fplxqhktopkbk7md
+| 03/27/2023 - 04/03/2023  | 刘帅 | https://lists.apache.org/thread/fk37cn8r5pd1y10vjvzvkl211b67vn4q
