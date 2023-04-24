@@ -81,6 +81,11 @@ namespace schan {
 class Sender;
 class SubDone;
 }
+namespace experimental {
+namespace internal {
+class StreamingInterface;
+}
+}
 
 // For serializing/parsing from idl services.
 struct IdlNames {
@@ -564,6 +569,8 @@ public:
     // -1 means no deadline.
     int64_t deadline_us() const { return _deadline_us; }
 
+    void set_streaming_visit(experimental::internal::StreamingInterface* visit) { _visit = visit; }
+
 private:
     struct CompletionInfo {
         CallId id;           // call_id of the corresponding request
@@ -814,6 +821,8 @@ private:
     StreamId _response_stream;
     // Defined at both sides
     StreamSettings *_remote_stream_settings;
+
+    experimental::internal::StreamingInterface* _visit;
 
     // Thrift method name, only used when thrift protocol enabled
     std::string _thrift_method_name;

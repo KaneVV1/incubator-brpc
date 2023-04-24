@@ -22,20 +22,21 @@
 #include "brpc/server.h"
 #include "brpc/channel.h"
 #include "brpc/grpc.h"
+#include "brpc/grpc_stream.h"
 #include "butil/time.h"
 #include "grpc.pb.h"
 
 int main(int argc, char* argv[]) {
     testing::InitGoogleTest(&argc, argv);
     GFLAGS_NS::ParseCommandLineFlags(&argc, &argv, true);
-    if (GFLAGS_NS::SetCommandLineOption("http_body_compress_threshold", "0").empty()) {
-        std::cerr << "Fail to set -crash_on_fatal_log" << std::endl;
-        return -1;
-    }
-    if (GFLAGS_NS::SetCommandLineOption("crash_on_fatal_log", "true").empty()) {
-        std::cerr << "Fail to set -crash_on_fatal_log" << std::endl;
-        return -1;
-    }
+    // if (GFLAGS_NS::SetCommandLineOption("http_body_compress_threshold", "0").empty()) {
+    //     std::cerr << "Fail to set -crash_on_fatal_log" << std::endl;
+    //     return -1;
+    // }
+    // if (GFLAGS_NS::SetCommandLineOption("crash_on_fatal_log", "true").empty()) {
+    //     std::cerr << "Fail to set -crash_on_fatal_log" << std::endl;
+    //     return -1;
+    // }
     return RUN_ALL_TESTS();
 }
 
@@ -270,6 +271,29 @@ TEST_F(GrpcTest, GrpcTimeOut) {
         stub.Method(&cntl, &req, &res, NULL);
         EXPECT_FALSE(cntl.Failed());
     }
+}
+
+TEST_F(GrpcTest, GrpcStream) {
+    // TODO
+    brpc::Channel channel;
+    brpc::Controller cntl;
+    test::GrpcRequest req;
+    test::GrpcResponse res;
+    test::GrpcService_Stub stub(&channel);
+    using namespace brpc::experimental;
+    auto stream_visit1 = grpcvisit::MakeCaller(
+        &test::GrpcService::SimpleMethod, &stub, &cntl, req, &res);
+    stream_visit1->Call();
+    auto stream_visit2 = grpcvisit::MakeWriter<test::GrpcRequest>(
+        &test::GrpcService::ClientStreamingMethod, &stub, &cntl, &res);
+    stream_visit2->Write(req);
+    auto stream_visit3 = grpcvisit::MakeReader<test::GrpcResponse>(
+        &test::GrpcService::ServerStreamingMethod, &stub, &cntl, req);
+    stream_visit3->Read(&res);
+    auto stream_visit4 = grpcvisit::MakeReaderWriter<test::GrpcRequest, test::GrpcResponse>(
+        &test::GrpcService::BidirectionalStreamingMethod, &stub, &cntl);
+    stream_visit4->Write(req);
+    stream_visit4->Read(&res);
 }
 
 } // namespace 

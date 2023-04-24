@@ -35,4 +35,22 @@ service GrpcService {
     rpc Method(GrpcRequest) returns (GrpcResponse);
     rpc MethodTimeOut(GrpcRequest) returns (GrpcResponse);
     rpc MethodNotExist(GrpcRequest) returns (GrpcResponse);
+
+    // grpc stream
+
+    // unary-unary(In a single call, the client can only send request once, and the server can
+    // only respond once.)
+    rpc SimpleMethod(GrpcRequest) returns (GrpcResponse);
+
+    // stream-unary (In a single call, the client can transfer data to the server several times,
+    // but the server can only return a response once.)
+    rpc ClientStreamingMethod(/*stream*/ GrpcRequest) returns (GrpcResponse);
+
+    // unary-stream (In a single call, the client can only transmit data to the server at one time,
+    // but the server can return the response many times.)
+    rpc ServerStreamingMethod(GrpcRequest) returns (/*stream*/ GrpcResponse);
+
+    // stream-stream (In a single call, both client and server can send and receive data
+    // to each other multiple times.)
+    rpc BidirectionalStreamingMethod(/*stream*/ GrpcRequest) returns (/*stream*/ GrpcResponse);
 }
