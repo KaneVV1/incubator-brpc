@@ -16,7 +16,6 @@
 // under the License.
 
 
-#include <wordexp.h>                                // wordexp
 #include <iomanip>
 #include <arpa/inet.h>                              // inet_aton
 #include <fcntl.h>                                  // O_CREAT
@@ -1716,23 +1715,7 @@ void Server::GenerateVersionIfNeeded() {
     }
 }
 
-static std::string ExpandPath(const std::string &path) {
-    if (path.empty()) {
-        return std::string();
-    }
-    std::string ret;
-    wordexp_t p;
-    wordexp(path.c_str(), &p, 0);
-    CHECK_EQ(p.we_wordc, 1u);
-    if (p.we_wordc == 1) {
-        ret = p.we_wordv[0];
-    }
-    wordfree(&p);
-    return ret;
-}
-
 void Server::PutPidFileIfNeeded() {
-    _options.pid_file = ExpandPath(_options.pid_file);
     if (_options.pid_file.empty()) {
         return;
     }
@@ -1812,7 +1795,7 @@ void Server::PrintTabsBody(std::ostream& os,
                     current_tab_name);
         }
     }
-    os << "<li id='https://github.com/brpc/brpc/blob/master/docs/cn/builtin_service.md' "
+    os << "<li id='https://github.com/apache/brpc/blob/master/docs/cn/builtin_service.md' "
         "class='help'>?</li>\n</ul>\n"
         "<div style='height:40px;'></div>";  // placeholder
 }
