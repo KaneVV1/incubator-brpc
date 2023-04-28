@@ -78,7 +78,9 @@ public:
 //     };
 // };
 
-template <typename W, typename R, typename Func, typename Stub>
+template <typename W, 
+          typename R, 
+          typename Func, typename Stub>
 class RpcExecutor {
 public:
     using ResponseType = R;
@@ -90,6 +92,7 @@ public:
     RpcExecutor(RpcExecutor&& other);
 
     void Run() {
+        (_stub->*_sm)(_cntl, nullptr, nullptr, nullptr);
 		LOG(INFO) << "RpcExecutor::Run()";
     }
 

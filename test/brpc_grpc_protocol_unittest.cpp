@@ -21,22 +21,25 @@
 #include "brpc/controller.h"
 #include "brpc/server.h"
 #include "brpc/channel.h"
+#include "brpc/streamable_channel.h"
 #include "brpc/grpc.h"
 #include "brpc/grpc_stream.h"
 #include "butil/time.h"
 #include "grpc.pb.h"
 
+DEFINE_string(server, "0.0.0.0:50051", "IP Address of server");
+
 int main(int argc, char* argv[]) {
     testing::InitGoogleTest(&argc, argv);
     GFLAGS_NS::ParseCommandLineFlags(&argc, &argv, true);
-    // if (GFLAGS_NS::SetCommandLineOption("http_body_compress_threshold", "0").empty()) {
-    //     std::cerr << "Fail to set -crash_on_fatal_log" << std::endl;
-    //     return -1;
-    // }
-    // if (GFLAGS_NS::SetCommandLineOption("crash_on_fatal_log", "true").empty()) {
-    //     std::cerr << "Fail to set -crash_on_fatal_log" << std::endl;
-    //     return -1;
-    // }
+    if (GFLAGS_NS::SetCommandLineOption("http_body_compress_threshold", "0").empty()) {
+        std::cerr << "Fail to set -crash_on_fatal_log" << std::endl;
+        return -1;
+    }
+    if (GFLAGS_NS::SetCommandLineOption("crash_on_fatal_log", "true").empty()) {
+        std::cerr << "Fail to set -crash_on_fatal_log" << std::endl;
+        return -1;
+    }
     return RUN_ALL_TESTS();
 }
 
@@ -275,25 +278,43 @@ TEST_F(GrpcTest, GrpcTimeOut) {
 
 TEST_F(GrpcTest, GrpcStream) {
     // TODO
-    brpc::Channel channel;
+    using namespace brpc::experimental;
+    
+    StreamableChannel channel;
     brpc::Controller cntl;
     test::GrpcRequest req;
     test::GrpcResponse res;
     test::GrpcService_Stub stub(&channel);
-    using namespace brpc::experimental;
-    auto stream_visit1 = grpcvisit::MakeCaller(
+
+    if (channel.Init(FLAGS_server.c_str()) != 0) {
+        LOG(ERROR) << "Fail to initialize channel";
+        return;
+    }
+
+    auto grpc_call = grpcvisit::MakeCaller(
         &test::GrpcService::SimpleMethod, &stub, &cntl, req, &res);
-    stream_visit1->Call();
-    auto stream_visit2 = grpcvisit::MakeWriter<test::GrpcRequest>(
+    if (grpc_call) {
+        grpc_call->Call();
+    }
+
+    auto grpc_writer = grpcvisit::MakeWriter<test::GrpcRequest>(
         &test::GrpcService::ClientStreamingMethod, &stub, &cntl, &res);
-    stream_visit2->Write(req);
-    auto stream_visit3 = grpcvisit::MakeReader<test::GrpcResponse>(
+    if (grpc_writer) {
+        grpc_writer->Write(req);
+    }
+
+    auto grpc_reader = grpcvisit::MakeReader<test::GrpcResponse>(
         &test::GrpcService::ServerStreamingMethod, &stub, &cntl, req);
-    stream_visit3->Read(&res);
-    auto stream_visit4 = grpcvisit::MakeReaderWriter<test::GrpcRequest, test::GrpcResponse>(
+    if (grpc_reader) {
+        grpc_reader->Read(&res);
+    }
+
+    auto grpc_reader_writer = grpcvisit::MakeReaderWriter<test::GrpcRequest, test::GrpcResponse>(
         &test::GrpcService::BidirectionalStreamingMethod, &stub, &cntl);
-    stream_visit4->Write(req);
-    stream_visit4->Read(&res);
+    if (grpc_reader_writer) {
+        grpc_reader_writer->Write(req);
+        grpc_reader_writer->Read(&res);
+    }
 }
 
 } // namespace 

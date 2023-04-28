@@ -135,6 +135,49 @@ endif()
 
 add_executable(server server.cpp ${PROTO_SRC} ${PROTO_HEADER} )
 add_executable(client client.cpp ${PROTO_SRC} ${PROTO_HEADER})
-
 target_link_libraries(server ${BRPC_LIB} ${DYNAMIC_LIB} ${GPERFTOOLS_LIBRARIES})
 target_link_libraries(client ${BRPC_LIB} ${DYNAMIC_LIB} ${GPERFTOOLS_LIBRARIES})
+
+add_executable(streamable_server streamable_server.cpp ${PROTO_SRC} ${PROTO_HEADER} )
+add_executable(streamable_client streamable_client.cpp ${PROTO_SRC} ${PROTO_HEADER})
+target_link_libraries(streamable_server ${BRPC_LIB} ${DYNAMIC_LIB} ${GPERFTOOLS_LIBRARIES})
+target_link_libraries(streamable_client ${BRPC_LIB} ${DYNAMIC_LIB} ${GPERFTOOLS_LIBRARIES})
+
+# grpc_client_server for test or cross validation
+find_package(gRPC CONFIG)
+if (gRPC_FOUND)
+    file(READ helloworld.proto input_content)
+    string(REGEX REPLACE "option cc_generic_services *= *true;\n" "" output_content "${input_content}")
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/helloworld_grpc.proto "${output_content}")
+
+    set(GRPC_PROTO ${CMAKE_CURRENT_BINARY_DIR}/helloworld_grpc.proto)
+    set(GRPC_CPP_SRC "${CMAKE_CURRENT_BINARY_DIR}/helloworld_grpc.pb.cc")
+    set(GRPC_CPP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/helloworld_grpc.pb.h")
+    set(GRPC_SRC "${CMAKE_CURRENT_BINARY_DIR}/helloworld_grpc.grpc.pb.cc")
+    set(GRPC_HEADER "${CMAKE_CURRENT_BINARY_DIR}/helloworld_grpc.grpc.pb.h")
+    set(GRPC_CPP_PLUGIN_EXECUTABLE $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+
+    add_custom_command(
+        OUTPUT "${GRPC_CPP_SRC}" "${GRPC_CPP_HEADER}" "${GRPC_SRC}" "${GRPC_HEADER}"
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+        ARGS --grpc_out "${CMAKE_CURRENT_BINARY_DIR}"
+            --cpp_out "${CMAKE_CURRENT_BINARY_DIR}"
+            -I "${CMAKE_CURRENT_BINARY_DIR}"
+            --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN_EXECUTABLE}
+            "${GRPC_PROTO}"
+        DEPENDS "${GRPC_PROTO}")
+
+    add_library(grpc_proto STATIC ${GRPC_SRC} ${GRPC_HEADER} 
+        ${GRPC_CPP_SRC} ${GRPC_CPP_HEADER})
+    target_compile_features(grpc_proto PRIVATE cxx_std_14)
+
+    add_executable(grpc_client grpc_client.cpp)
+    target_compile_features(grpc_client PRIVATE cxx_std_14)
+    target_link_libraries(grpc_client grpc_proto 
+        absl::flags absl::flags_parse gRPC::grpc++ gRPC::grpc++_reflection ${PROTOBUF_LIBRARIES})
+
+    add_executable(grpc_server grpc_server.cpp)
+    target_compile_features(grpc_server PRIVATE cxx_std_14)
+    target_link_libraries(grpc_server grpc_proto 
+        absl::flags absl::flags_parse gRPC::grpc++ gRPC::grpc++_reflection ${PROTOBUF_LIBRARIES})
+endif()
