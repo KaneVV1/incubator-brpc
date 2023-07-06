@@ -557,27 +557,27 @@ int Socket::ResetFileDescriptor(int fd) {
     // OK to fail, namely unix domain socket does not support this.
     butil::make_no_delay(fd);
     if (_tos > 0 &&
-        setsockopt(fd, IPPROTO_IP, IP_TOS, &_tos, sizeof(_tos)) < 0) {
-        PLOG(FATAL) << "Fail to set tos of fd=" << fd << " to " << _tos;
+        setsockopt(fd, IPPROTO_IP, IP_TOS, &_tos, sizeof(_tos)) != 0) {
+        PLOG(ERROR) << "Fail to set tos of fd=" << fd << " to " << _tos;
     }
 
     if (FLAGS_socket_send_buffer_size > 0) {
         int buff_size = FLAGS_socket_send_buffer_size;
-        socklen_t size = sizeof(buff_size);
-        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buff_size, size) != 0) {
-            PLOG(FATAL) << "Fail to set sndbuf of fd=" << fd << " to " 
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buff_size, sizeof(buff_size)) != 0) {
+            PLOG(ERROR) << "Fail to set sndbuf of fd=" << fd << " to "
                         << buff_size;
         }
     }
 
     if (FLAGS_socket_recv_buffer_size > 0) {
         int buff_size = FLAGS_socket_recv_buffer_size;
-        socklen_t size = sizeof(buff_size);
-        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buff_size, size) != 0) {
-            PLOG(FATAL) << "Fail to set rcvbuf of fd=" << fd << " to " 
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buff_size, sizeof(buff_size)) != 0) {
+            PLOG(ERROR) << "Fail to set rcvbuf of fd=" << fd << " to "
                         << buff_size;
         }
     }
+
+    EnableKeepaliveIfNeeded(fd);
 
     if (_on_edge_triggered_events) {
         if (GetGlobalEventDispatcher(fd).AddConsumer(id(), fd) != 0) {
@@ -588,6 +588,69 @@ int Socket::ResetFileDescriptor(int fd) {
         }
     }
     return 0;
+}
+
+void Socket::EnableKeepaliveIfNeeded(int fd) {
+    if (!_keepalive_options) {
+        return;
+    }
+
+    int keepalive = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive,
+                   sizeof(keepalive)) != 0) {
+        PLOG(ERROR) << "Fail to set keepalive of fd=" << fd;
+        return;
+    }
+
+#if defined(OS_LINUX)
+    if (_keepalive_options->keepalive_idle_s > 0) {
+        if (setsockopt(fd, SOL_TCP, TCP_KEEPIDLE,
+                       &_keepalive_options->keepalive_idle_s,
+                       sizeof(_keepalive_options->keepalive_idle_s)) != 0) {
+            PLOG(ERROR) << "Fail to set keepidle of fd=" << fd;
+        }
+    }
+
+    if (_keepalive_options->keepalive_interval_s > 0) {
+        if (setsockopt(fd, SOL_TCP, TCP_KEEPINTVL,
+                       &_keepalive_options->keepalive_interval_s,
+                       sizeof(_keepalive_options->keepalive_interval_s)) != 0) {
+            PLOG(ERROR) << "Fail to set keepintvl of fd=" << fd;
+        }
+    }
+
+    if (_keepalive_options->keepalive_count > 0) {
+        if (setsockopt(fd, SOL_TCP, TCP_KEEPCNT,
+                       &_keepalive_options->keepalive_count,
+                       sizeof(_keepalive_options->keepalive_count)) != 0) {
+            PLOG(ERROR) << "Fail to set keepcnt of fd=" << fd;
+        }
+    }
+#elif defined(OS_MACOSX)
+    if (_keepalive_options->keepalive_idle_s > 0) {
+        if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE,
+                       &_keepalive_options->keepalive_idle_s,
+                       sizeof(_keepalive_options->keepalive_idle_s)) != 0) {
+            PLOG(ERROR) << "Fail to set keepidle of fd=" << fd;
+        }
+    }
+
+    if (_keepalive_options->keepalive_interval_s > 0) {
+        if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL,
+                       &_keepalive_options->keepalive_interval_s,
+                       sizeof(_keepalive_options->keepalive_interval_s)) != 0) {
+            PLOG(ERROR) << "Fail to set keepintvl of fd=" << fd;
+        }
+    }
+
+    if (_keepalive_options->keepalive_count > 0) {
+        if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,
+                       &_keepalive_options->keepalive_count,
+                       sizeof(_keepalive_options->keepalive_count)) != 0) {
+            PLOG(ERROR) << "Fail to set keepcnt of fd=" << fd;
+        }
+    }
+#endif
 }
 
 // SocketId = 32-bit version + 32-bit slot.
@@ -635,6 +698,7 @@ int Socket::Create(const SocketOptions& options, SocketId* id) {
         m->SetFailed(rc2, "Fail to create auth_id: %s", berror(rc2));
         return -1;
     }
+    m->_force_ssl = options.force_ssl;
     // Disable SSL check if there is no SSL context
     m->_ssl_state = (options.initial_ssl_ctx == NULL ? SSL_OFF : SSL_UNKNOWN);
     m->_ssl_session = NULL;
@@ -676,6 +740,7 @@ int Socket::Create(const SocketOptions& options, SocketId* id) {
     }
     m->_last_writetime_us.store(cpuwide_now, butil::memory_order_relaxed);
     m->_unwritten_bytes.store(0, butil::memory_order_relaxed);
+    m->_keepalive_options = options.keepalive_options;
     CHECK(NULL == m->_write_head.load(butil::memory_order_relaxed));
     // Must be last one! Internal fields of this Socket may be access
     // just after calling ResetFileDescriptor.
@@ -1505,6 +1570,7 @@ X509* Socket::GetPeerCertificate() const {
     if (ssl_state() != SSL_CONNECTED) {
         return NULL;
     }
+    BAIDU_SCOPED_LOCK(_ssl_session_mutex);
     return SSL_get_peer_certificate(_ssl_session);
 }
 
@@ -1815,11 +1881,15 @@ ssize_t Socket::DoWrite(WriteRequest* req) {
     CHECK_EQ(SSL_CONNECTED, ssl_state());
     if (_conn) {
         // TODO: Separate SSL stuff from SocketConnection
+        BAIDU_SCOPED_LOCK(_ssl_session_mutex);
         return _conn->CutMessageIntoSSLChannel(_ssl_session, data_list, ndata);
     }
     int ssl_error = 0;
-    ssize_t nw = butil::IOBuf::cut_multiple_into_SSL_channel(
-        _ssl_session, data_list, ndata, &ssl_error);
+    ssize_t nw = 0;
+    {
+        BAIDU_SCOPED_LOCK(_ssl_session_mutex);
+        nw = butil::IOBuf::cut_multiple_into_SSL_channel(_ssl_session, data_list, ndata, &ssl_error);
+    }
     switch (ssl_error) {
     case SSL_ERROR_NONE:
         break;
@@ -1957,13 +2027,21 @@ ssize_t Socket::DoRead(size_t size_hint) {
     }
     // _ssl_state has been set
     if (ssl_state() == SSL_OFF) {
+        if (_force_ssl) {
+            errno = ESSL;
+            return -1;
+        }
         CHECK(_rdma_state == RDMA_OFF);
         return _read_buf.append_from_file_descriptor(fd(), size_hint);
     }
 
     CHECK_EQ(SSL_CONNECTED, ssl_state());
     int ssl_error = 0;
-    ssize_t nr = _read_buf.append_from_SSL_channel(_ssl_session, &ssl_error, size_hint);
+    ssize_t nr = 0;
+    {
+        BAIDU_SCOPED_LOCK(_ssl_session_mutex);
+        nr = _read_buf.append_from_SSL_channel(_ssl_session, &ssl_error, size_hint);
+    }
     switch (ssl_error) {
     case SSL_ERROR_NONE:  // `nr' > 0
         break;
@@ -2268,6 +2346,57 @@ void Socket::DebugSocket(std::ostream& os, SocketId id) {
         Print(os, ptr->_ssl_session, "\n  ");
         os << "\n}";
     }
+
+    {
+        int keepalive = 0;
+        socklen_t len = sizeof(keepalive);
+        if (getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, &len) == 0) {
+            os << "\nkeepalive=" << keepalive;
+        }
+    }
+
+    {
+        int keepidle = 0;
+        socklen_t len = sizeof(keepidle);
+#if defined(OS_MACOSX)
+        if (getsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &keepidle, &len) == 0) {
+            os << "\ntcp_keepalive_time=" << keepidle;
+        }
+#elif defined(OS_LINUX)
+        if (getsockopt(fd, SOL_TCP, TCP_KEEPIDLE, &keepidle, &len) == 0) {
+            os << "\ntcp_keepalive_time=" << keepidle;
+        }
+#endif
+    }
+
+    {
+        int keepintvl = 0;
+        socklen_t len = sizeof(keepintvl);
+#if defined(OS_MACOSX)
+        if (getsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, &len) == 0) {
+            os << "\ntcp_keepalive_intvl=" << keepintvl;
+        }
+#elif defined(OS_LINUX)
+        if (getsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &keepintvl, &len) == 0) {
+            os << "\ntcp_keepalive_intvl=" << keepintvl;
+        }
+#endif
+    }
+
+    {
+        int keepcnt = 0;
+        socklen_t len = sizeof(keepcnt);
+#if defined(OS_MACOSX)
+        if (getsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, &len) == 0) {
+            os << "\ntcp_keepalive_probes=" << keepcnt;
+        }
+#elif defined(OS_LINUX)
+        if (getsockopt(fd, SOL_TCP, TCP_KEEPCNT, &keepcnt, &len) == 0) {
+            os << "\ntcp_keepalive_probes=" << keepcnt;
+        }
+#endif
+    }
+
 #if defined(OS_MACOSX)
     struct tcp_connection_info ti;
     socklen_t len = sizeof(ti);
