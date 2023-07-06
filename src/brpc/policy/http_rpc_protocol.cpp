@@ -21,6 +21,7 @@
 #include <gflags/gflags.h>
 #include <json2pb/pb_to_json.h>                    // ProtoMessageToJson
 #include <json2pb/json_to_pb.h>                    // JsonToProtoMessage
+#include <string>
 
 #include "brpc/policy/http_rpc_protocol.h"
 #include "butil/unique_ptr.h"                       // std::unique_ptr
@@ -151,6 +152,7 @@ CommonStrings::CommonStrings()
     , GRPC_STATUS("grpc-status")
     , GRPC_MESSAGE("grpc-message")
     , GRPC_TIMEOUT("grpc-timeout")
+    , DEFAULT_PATH("/")
 {}
 
 static CommonStrings* common = NULL;
@@ -1081,7 +1083,7 @@ FindMethodPropertyByURI(const std::string& uri_path, const Server* server,
 }
 
 ParseResult ParseHttpMessage(butil::IOBuf *source, Socket *socket,
-                             bool read_eof, const void* /*arg*/) {
+                             bool read_eof, const void* arg) {
     HttpContext* http_imsg = 
         static_cast<HttpContext*>(socket->parsing_context());
     if (http_imsg == NULL) {
@@ -1145,16 +1147,20 @@ ParseResult ParseHttpMessage(butil::IOBuf *source, Socket *socket,
         if (http_imsg->Completed()) {
             CHECK_EQ(http_imsg, socket->release_parsing_context());
             const ParseResult result = MakeMessage(http_imsg);
+            http_imsg->CheckProgressiveRead(arg, socket);
             if (socket->is_read_progressive()) {
                 socket->OnProgressiveReadCompleted();
             }
             return result;
-        } else if (socket->is_read_progressive() &&
-                   http_imsg->stage() >= HTTP_ON_HEADERS_COMPLETE) {
-            // header part of a progressively-read http message is complete,
-            // go on to ProcessHttpXXX w/o waiting for full body.
-            http_imsg->AddOneRefForStage2(); // released when body is fully read
-            return MakeMessage(http_imsg);
+        } else if (http_imsg->stage() >= HTTP_ON_HEADERS_COMPLETE) {
+            http_imsg->CheckProgressiveRead(arg, socket);
+            if (socket->is_read_progressive()) {
+                // header part of a progressively-read http message is complete,
+                // go on to ProcessHttpXXX w/o waiting for full body.
+                http_imsg->AddOneRefForStage2(); // released when body is fully read
+                return MakeMessage(http_imsg);
+            }
+            return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
         } else {
             return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
         }
@@ -1277,7 +1283,6 @@ void ProcessHttpRequest(InputMessageBase *msg) {
     HttpHeader& req_header = cntl->http_request();
     imsg_guard->header().Swap(req_header);
     butil::IOBuf& req_body = imsg_guard->body();
-
     butil::EndPoint user_addr;
     if (!GetUserAddressFromHeader(req_header, &user_addr)) {
         user_addr = socket->remote_side();
@@ -1430,6 +1435,9 @@ void ProcessHttpRequest(InputMessageBase *msg) {
                             " -usercode_in_pthread is on");
             return;
         }
+        if (!server->AcceptRequest(cntl)) {
+            return;
+        }
     } else if (security_mode) {
         cntl->SetFailed(EPERM, "Not allowed to access builtin services, try "
                         "ServerOptions.internal_port=%d instead if you're in"
@@ -1543,8 +1551,12 @@ void ProcessHttpRequest(InputMessageBase *msg) {
             sample->submit(start_parse_us);
         }
     } else {
-        // A http server, just keep content as it is.
-        cntl->request_attachment().swap(req_body);
+        if (imsg_guard->read_body_progressively()) {
+            accessor.set_readable_progressive_attachment(imsg_guard.get());
+        } else {
+            // A http server, just keep content as it is.
+            cntl->request_attachment().swap(req_body);
+        }
     }
 
     google::protobuf::Closure* done = new HttpResponseSenderAsDone(&resp_sender);
@@ -1596,7 +1608,22 @@ bool ParseHttpServerAddress(butil::EndPoint* point, const char* server_addr_and_
 const std::string& GetHttpMethodName(
     const google::protobuf::MethodDescriptor*,
     const Controller* cntl) {
-    return cntl->http_request().uri().path();
+    const std::string& path = cntl->http_request().uri().path();
+    return !path.empty() ? path : common->DEFAULT_PATH;
+}
+
+void HttpContext::CheckProgressiveRead(const void* arg, Socket *socket) {
+    if (arg == NULL || !((Server *)arg)->has_progressive_read_method()) {
+        // arg == NULL indicates not in server-end
+        return;
+    }
+    const Server::MethodProperty *const sp = FindMethodPropertyByURI(
+        header().uri().path(), (Server *)arg,
+        const_cast<std::string *>(&header().unresolved_path()));
+    if (sp != NULL && sp->params.enable_progressive_read) {
+        this->set_read_body_progressively(true);
+        socket->read_will_be_progressive(CONNECTION_TYPE_SHORT);
+    }
 }
 
 }  // namespace policy

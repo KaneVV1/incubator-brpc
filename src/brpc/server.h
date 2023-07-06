@@ -41,6 +41,7 @@
 #include "brpc/adaptive_max_concurrency.h"
 #include "brpc/http2.h"
 #include "brpc/redis.h"
+#include "brpc/interceptor.h"
 
 namespace brpc {
 
@@ -90,6 +91,15 @@ struct ServerOptions {
     // true:  `auth' is owned by server and will be deleted when server is destructed.
     // Default: false
     bool server_owns_auth;
+
+    // Turn on request interception  if `interceptor' is not NULL.
+    // Default: NULL
+    const Interceptor* interceptor;
+
+    // false: `interceptor' is not owned by server and must be valid when server is running.
+    // true:  `interceptor' is owned by server and will be deleted when server is destructed.
+    // Default: false
+    bool server_owns_interceptor;
 
     // Number of pthreads that server runs on. Notice that this is just a hint,
     // you can't assume that the server uses exactly so many pthreads because
@@ -207,6 +217,9 @@ struct ServerOptions {
     const ServerSSLOptions& ssl_options() const { return *_ssl_options; }
     ServerSSLOptions* mutable_ssl_options();
 
+    // Force ssl for all connections of the port to Start().
+    bool force_ssl;
+
     // Whether the server uses rdma or not
     // Default: false
     bool use_rdma;
@@ -309,6 +322,10 @@ struct ServiceOptions {
     // decode json array to protobuf message which contains a single repeated field.
     // Default: false.
     bool pb_single_repeated_to_array;
+
+    // enable server end progressive reading, mainly for http server
+    // Default: false.
+    bool enable_progressive_read;
 };
 
 // Represent ports inside [min_port, max_port]
@@ -359,6 +376,7 @@ public:
             bool allow_http_body_to_pb;
             bool pb_bytes_to_base64;
             bool pb_single_repeated_to_array;
+            bool enable_progressive_read;
             OpaqueParams();
         };
         OpaqueParams params;
@@ -550,6 +568,13 @@ public:
     int Concurrency() const {
         return butil::subtle::NoBarrier_Load(&_concurrency);
     };
+  
+    // Returns true if accept request, reject request otherwise.
+    bool AcceptRequest(Controller* cntl) const;
+
+    bool has_progressive_read_method() const {
+        return this->_has_progressive_read_method;
+    }
 
 private:
 friend class StatusService;
@@ -701,6 +726,8 @@ friend class Controller;
     mutable bvar::PerSecond<bvar::Adder<int64_t> > _eps_bvar;
     BAIDU_CACHELINE_ALIGNMENT mutable int32_t _concurrency;
     bvar::PassiveStatus<int32_t> _concurrency_bvar;
+
+    bool _has_progressive_read_method;
 };
 
 // Get the data attached to current searching thread. The data is created by
