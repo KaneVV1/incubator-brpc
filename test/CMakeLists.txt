@@ -31,6 +31,7 @@ set(TEST_PROTO_FILES addressbook1.proto
                      snappy_message.proto
                      v1.proto
                      v2.proto
+                     v3.proto
                      grpc.proto
                      health_check.proto)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test/hdrs)
@@ -51,7 +52,7 @@ else()
     message(FATAL_ERROR "Googletest is not available")
 endif()
 
-set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_GLOG=${WITH_GLOG_VAL} -DBRPC_WITH_RDMA=${WITH_RDMA_VAL} -DGFLAGS_NS=${GFLAGS_NS}")
+set(CMAKE_CPP_FLAGS "${CMAKE_CPP_FLAGS} ${DEFINE_CLOCK_GETTIME} -DBRPC_WITH_GLOG=${WITH_GLOG_VAL} -DBRPC_WITH_RDMA=${WITH_RDMA_VAL}")
 set(CMAKE_CPP_FLAGS "${CMAKE_CPP_FLAGS} -DBTHREAD_USE_FAST_PTHREAD_MUTEX -D__const__=__unused__ -D_GNU_SOURCE -DUSE_SYMBOLIZE -DNO_TCMALLOC -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -DUNIT_TEST -Dprivate=public -Dprotected=public -DBVAR_NOT_LINK_DEFAULT_VARIABLES -D__STRICT_ANSI__ -include ${PROJECT_SOURCE_DIR}/test/sstream_workaround.h")
 set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -g -O2 -pipe -Wall -W -fPIC -fstrict-aliasing -Wno-invalid-offsetof -Wno-unused-parameter -fno-omit-frame-pointer")
 use_cxx11()
@@ -80,6 +81,7 @@ SET(TEST_BUTIL_SOURCES
     ${PROJECT_SOURCE_DIR}/test/at_exit_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/atomicops_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/base64_unittest.cc
+    ${PROJECT_SOURCE_DIR}/test/base64url_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/big_endian_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/bits_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/hash_tables_unittest.cc
@@ -87,6 +89,7 @@ SET(TEST_BUTIL_SOURCES
     ${PROJECT_SOURCE_DIR}/test/mru_cache_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/small_map_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/stack_container_unittest.cc
+    ${PROJECT_SOURCE_DIR}/test/mpsc_queue_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/cpu_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/crash_logging_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/leak_tracker_unittest.cc
@@ -143,6 +146,7 @@ SET(TEST_BUTIL_SOURCES
     ${PROJECT_SOURCE_DIR}/test/thread_id_name_manager_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/thread_local_storage_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/thread_local_unittest.cc
+    ${PROJECT_SOURCE_DIR}/test/abalist_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/watchdog_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/time_unittest.cc
     ${PROJECT_SOURCE_DIR}/test/version_unittest.cc
@@ -162,6 +166,7 @@ SET(TEST_BUTIL_SOURCES
     ${PROJECT_SOURCE_DIR}/test/synchronous_event_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/temp_file_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/baidu_thread_local_unittest.cpp
+    ${PROJECT_SOURCE_DIR}/test/thread_key_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/baidu_time_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/flat_map_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/crc32c_unittest.cc
@@ -169,7 +174,8 @@ SET(TEST_BUTIL_SOURCES
     ${PROJECT_SOURCE_DIR}/test/object_pool_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/test_switches.cc
     ${PROJECT_SOURCE_DIR}/test/scoped_locale.cc
-    ${PROJECT_SOURCE_DIR}/test/butil_unittest_main.cpp
+    ${PROJECT_SOURCE_DIR}/test/scope_guard_unittest.cpp
+    ${PROJECT_SOURCE_DIR}/test/optional_unittest.cpp
     ${PROJECT_SOURCE_DIR}/test/butil_unittest_main.cpp
 	)
 
@@ -252,3 +258,28 @@ foreach(BRPC_UT ${BRPC_UNITTESTS})
                                         ${GPERFTOOLS_LIBRARIES})
     add_test(NAME ${BRPC_UT_WE} COMMAND ${BRPC_UT_WE})
 endforeach()
+
+if(BUILD_FUZZ_TESTS)
+    add_library(brpc-static-debug STATIC $<TARGET_OBJECTS:BUTIL_DEBUG_LIB>
+                                        $<TARGET_OBJECTS:SOURCES_DEBUG_LIB>
+                                        $<TARGET_OBJECTS:PROTO_LIB>)
+    # change the debug lib output dir to be different from the release output
+    set_target_properties(brpc-static-debug PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/test)
+
+    target_link_libraries(brpc-static-debug ${DYNAMIC_LIB})
+    if(BRPC_WITH_GLOG)
+        target_link_libraries(brpc-static-debug ${GLOG_LIB})
+    endif()
+
+    set(FUZZ_TARGETS fuzz_butil fuzz_esp fuzz_hpack fuzz_http
+        fuzz_hulu fuzz_json fuzz_redis fuzz_shead fuzz_sofa fuzz_uri)
+
+    foreach(target ${FUZZ_TARGETS})
+        add_executable(${target} fuzzing/${target}.cpp $<TARGET_OBJECTS:TEST_PROTO_LIB>)
+        target_link_libraries(${target} brpc-static-debug ${LIB_FUZZING_ENGINE})
+        set_target_properties(${target} PROPERTIES
+            BUILD_WITH_INSTALL_RPATH TRUE
+            INSTALL_RPATH "$ORIGIN/lib")
+    endforeach()
+endif()

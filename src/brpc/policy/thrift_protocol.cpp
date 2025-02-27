@@ -40,13 +40,16 @@
 #include <thrift/TApplicationException.h>
 
 // _THRIFT_STDCXX_H_ is defined by thrift/stdcxx.h which was added since thrift 0.11.0
+// but deprecated after thrift 0.13.0
 #include <thrift/TProcessor.h> // to include stdcxx.h if present
 #ifndef THRIFT_STDCXX
  #if defined(_THRIFT_STDCXX_H_)
  # define THRIFT_STDCXX apache::thrift::stdcxx
- #else
+ #elif defined(_THRIFT_VERSION_LOWER_THAN_0_11_0_)
  # define THRIFT_STDCXX boost
  # include <boost/make_shared.hpp>
+ #else
+ # define THRIFT_STDCXX std
  #endif
 #endif
 
@@ -527,7 +530,7 @@ void ProcessThriftRequest(InputMessageBase* msg_base) {
     if (!server->IsRunning()) {
         return cntl->SetFailed(ELOGOFF, "Server is stopping");
     }
-    if (socket->is_overcrowded()) {
+    if (socket->is_overcrowded() && !server->options().ignore_eovercrowded) {
         return cntl->SetFailed(EOVERCROWDED, "Connection to %s is overcrowded",
                 butil::endpoint2str(socket->remote_side()).c_str());
     }

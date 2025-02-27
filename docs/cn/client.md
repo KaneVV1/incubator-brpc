@@ -584,10 +584,6 @@ r34717后Controller.has_backup_request()获知是否发送过backup_request。
 
 如果server一直没有返回，但连接没有问题，这种情况下不会重试。如果你需要在一定时间后发送另一个请求，使用backup request。
 
-工作机制如下：如果response没有在backup_request_ms内返回，则发送另外一个请求，哪个先回来就取哪个。新请求会被尽量送到不同的server。注意如果backup_request_ms大于超时，则backup request总不会被发送。backup request会消耗一次重试次数。backup request不意味着server端cancel。
-
-ChannelOptions.backup_request_ms影响该Channel上所有RPC，单位毫秒，默认值-1（表示不开启），Controller.set_backup_request_ms()可修改某次RPC的值。
-
 ### 没到超时
 
 超时后RPC会尽快结束。
@@ -630,6 +626,112 @@ options.retry_policy = &g_my_retry_policy;
 
 * 通过cntl->response()可获得对应RPC的response。
 * 对ERPCTIMEDOUT代表的RPC超时总是不重试，即使你继承的RetryPolicy中允许。
+
+
+### 重试退避
+
+对于一些暂时性的错误，如网络抖动等，等待一小会儿再重试的成功率比立即重试的成功率高，同时可以打散上游重试的时机，减轻服务端压力，避免重试风暴导致服务端出现瞬间流量洪峰。
+
+框架支持两种重试退避策略：固定时间间隔退避策略和随机时间间隔退避策略。
+
+固定时间间隔退避策略需要设置固定时间间隔（毫秒）、无需重试退避的剩余rpc时间阈值（毫秒，当剩余rpc时间小于阈值，则不进行重试退避）、是否允许在pthread进行重试退避。使用方法如下：
+
+```c++
+// 给ChannelOptions.retry_policy赋值就行了。
+// 注意：retry_policy必须在Channel使用期间保持有效，Channel也不会删除retry_policy，所以大部分情况下RetryPolicy都应以单例模式创建。
+brpc::ChannelOptions options;
+int32_t fixed_backoff_time_ms = 100; // 固定时间间隔（毫秒）
+int32_t no_backoff_remaining_rpc_time_ms = 150; // 无需重试退避的剩余rpc时间阈值（毫秒）
+bool retry_backoff_in_pthread = false;
+static brpc::RpcRetryPolicyWithFixedBackoff g_retry_policy_with_fixed_backoff(
+        fixed_backoff_time_ms, no_backoff_remaining_rpc_time_ms, retry_backoff_in_pthread);
+options.retry_policy = &g_retry_policy_with_fixed_backoff;
+...
+```
+
+随机时间间隔退避策略需要设置最小时间间隔（毫秒）、最大时间间隔（毫秒）、无需重试退避的剩余rpc时间阈值（毫秒，当剩余rpc时间小于阈值，则不进行重试退避）、是否允许在pthread做重试退避。每次策略会随机生成一个在最小时间间隔和最大时间间隔之间的重试退避间隔。使用方法如下：
+
+```c++
+// 给ChannelOptions.retry_policy赋值就行了。
+// 注意：retry_policy必须在Channel使用期间保持有效，Channel也不会删除retry_policy，所以大部分情况下RetryPolicy都应以单例模式创建。
+brpc::ChannelOptions options;
+int32_t min_backoff_time_ms = 100; // 最小时间间隔（毫秒）
+int32_t max_backoff_time_ms = 200; // 最大时间间隔（毫秒）
+int32_t no_backoff_remaining_rpc_time_ms = 150; // 无需重试退避的剩余rpc时间阈值（毫秒）
+bool retry_backoff_in_pthread = false; // 是否允许在pthread做重试退避
+static brpc::RpcRetryPolicyWithJitteredBackoff g_retry_policy_with_jitter_backoff(
+        min_backoff_time_ms, max_backoff_time_ms, 
+        no_backoff_remaining_rpc_time_ms, retry_backoff_in_pthread);
+options.retry_policy = &g_retry_policy_with_jitter_backoff;
+...
+```
+
+用户可以通过继承[brpc::RetryPolicy](https://github.com/apache/brpc/blob/master/src/brpc/retry_policy.h)自定义重试退避策略。比如只需要针对服务端并发数超限的情况进行重试退避，可以这么做：
+
+```c++
+class MyRetryPolicy : public brpc::RetryPolicy {
+public:
+    bool DoRetry(const brpc::Controller* cntl) const {
+        // 同《错误值得重试》一节
+    }
+    
+    int32_t GetBackoffTimeMs(const brpc::Controller* cntl) const {
+        if (controller->ErrorCode() == brpc::ELIMIT) {
+            return 100; // 退避100毫秒
+        }
+        return 0; // 返回0表示不进行重试退避。
+    }
+    
+    bool CanRetryBackoffInPthread() const {
+        return true;
+    }
+};
+...
+
+// 给ChannelOptions.retry_policy赋值就行了。
+// 注意：retry_policy必须在Channel使用期间保持有效，Channel也不会删除retry_policy，所以大部分情况下RetryPolicy都应以单例模式创建。
+brpc::ChannelOptions options;
+static MyRetryPolicy g_my_retry_policy;
+options.retry_policy = &g_my_retry_policy;
+...
+```
+
+如果用户希望使用框架默认的DoRetry，只实现自定义的重试退避策略，则可以继承[brpc::RpcRetryPolicy](https://github.com/apache/brpc/blob/master/src/brpc/retry_policy.h)。
+
+一些提示：
+
+- 当策略返回的重试退避时间大于等于剩余的rpc时间或者等于0，框架不会进行重试退避，而是立即进行重试。
+- [brpc::RpcRetryPolicyWithFixedBackoff](https://github.com/apache/brpc/blob/master/src/brpc/retry_policy.h)（固定时间间隔退策略）和[brpc::RpcRetryPolicyWithJitteredBackoff](https://github.com/apache/brpc/blob/master/src/brpc/retry_policy.h)（随机时间间隔退策略）继承了[brpc::RpcRetryPolicy](https://github.com/apache/brpc/blob/master/src/brpc/retry_policy.h)，使用框架默认的DoRetry。
+- 在pthread中进行重试退避（实际上通过bthread_usleep实现）会阻塞pthread，所以默认不会在pthread上进行重试退避。
+
+### backup request
+
+工作机制如下：如果response没有在backup_request_ms内返回，则发送另外一个请求，哪个先回来就取哪个。新请求会被尽量送到不同的server。注意如果backup_request_ms大于超时，则backup request总不会被发送。backup request会消耗一次重试次数。backup request不意味着server端cancel。
+
+ChannelOptions.backup_request_ms影响该Channel上所有RPC，单位毫秒，默认值-1（表示不开启）。Controller.set_backup_request_ms()可修改某次RPC的值。
+
+用户可以通过继承[brpc::BackupRequestPolicy](https://github.com/apache/brpc/blob/master/src/brpc/backup_request_policy.h)自定义策略（backup_request_ms和熔断backup request）。 比如根据延时调节backup_request_ms或者根据错误率熔断部分backup request。
+
+ChannelOptions.backup_request_policy同样影响该Channel上所有RPC。Controller.set_backup_request_policy()可修改某次RPC的策略。backup_request_policy优先级高于backup_request_ms。
+
+brpc::BackupRequestPolicy接口如下：
+
+```c++
+class BackupRequestPolicy {
+public:
+    virtual ~BackupRequestPolicy() = default;
+
+    // Return the time in milliseconds in which another request
+    // will be sent if RPC does not finish.
+    virtual int32_t GetBackupRequestMs(const Controller* controller) const = 0;
+
+    // Return true if the backup request should be sent.
+    virtual bool DoBackup(const Controller* controller) const = 0;
+    
+    // Called  when a rpc is end, user can collect call information to adjust policy.
+    virtual void OnRPCEnd(const Controller* controller) = 0;
+};
+```
 
 ### 重试应当保守
 
@@ -754,6 +856,9 @@ options.mutable_ssl_options();
 // 开启客户端SSL并定制选项。
 options.mutable_ssl_options()->ciphers_name = "...";
 options.mutable_ssl_options()->sni_name = "...";
+
+// 设置 ALPN 的协议优先级（默认不启用 ALPN）。
+options.mutable_ssl_options()->alpn_protocols = {"h2", "http/1.1"};
 ```
 - 连接单点和集群的Channel均可以开启SSL访问（初始实现曾不支持集群）。
 - 开启后，该Channel上任何协议的请求，都会被SSL加密后发送。如果希望某些请求不加密，需要额外再创建一个Channel。

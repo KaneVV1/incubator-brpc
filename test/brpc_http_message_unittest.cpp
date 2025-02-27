@@ -26,6 +26,17 @@
 #include "echo.pb.h"
 
 namespace brpc {
+
+DECLARE_bool(allow_chunked_length);
+DECLARE_bool(allow_http_1_1_request_without_host);
+
+int main(int argc, char* argv[]) {
+    testing::InitGoogleTest(&argc, argv);
+    GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+    brpc::FLAGS_allow_http_1_1_request_without_host = true;
+    return RUN_ALL_TESTS();
+}
+
 namespace policy {
 Server::MethodProperty*
 FindMethodPropertyByURI(const std::string& uri_path, const Server* server,
@@ -66,7 +77,7 @@ TEST(HttpMessageTest, http_method) {
 }
 
 TEST(HttpMessageTest, eof) {
-    GFLAGS_NS::SetCommandLineOption("verbose", "100");
+    GFLAGS_NAMESPACE::SetCommandLineOption("verbose", "100");
     const char* http_request = 
         "GET /CloudApiControl/HttpServer/telematics/v3/weather?location=%E6%B5%B7%E5%8D%97%E7%9C%81%E7%9B%B4%E8%BE%96%E5%8E%BF%E7%BA%A7%E8%A1%8C%E6%94%BF%E5%8D%95%E4%BD%8D&output=json&ak=0l3FSP6qA0WbOzGRaafbmczS HTTP/1.1\r\n"
         "X-Host: api.map.baidu.com\r\n"
@@ -226,6 +237,191 @@ TEST(HttpMessageTest, parse_from_iobuf) {
     ASSERT_EQ("text/plain", http_message.header().content_type());
 }
 
+
+TEST(HttpMessageTest, parse_http_head_response) {
+    char response1[1024] = "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: text/plain\r\n"
+                          "Content-Length: 1024\r\n"
+                          "\r\n";
+    butil::IOBuf request;
+    request.append(response1);
+
+    brpc::HttpMessage http_message(false, brpc::HTTP_METHOD_HEAD);
+    ASSERT_TRUE(http_message.ParseFromIOBuf(request) >= 0);
+    ASSERT_TRUE(http_message.Completed()) << http_message.stage();
+    ASSERT_EQ("text/plain", http_message.header().content_type());
+    const std::string* content_length = http_message.header().GetHeader("Content-Length");
+    ASSERT_NE(nullptr, content_length);
+    ASSERT_EQ("1024", *content_length);
+
+
+    char response2[1024] = "HTTP/1.1 200 OK\r\n"
+                           "Content-Type: text/plain\r\n"
+                           "Transfer-Encoding: chunked\r\n"
+                           "\r\n";
+    butil::IOBuf request2;
+    request2.append(response2);
+    brpc::HttpMessage http_message2(false, brpc::HTTP_METHOD_HEAD);
+    ASSERT_TRUE(http_message2.ParseFromIOBuf(request2) >= 0);
+    ASSERT_TRUE(http_message2.Completed()) << http_message2.stage();
+    ASSERT_EQ("text/plain", http_message2.header().content_type());
+    const std::string* transfer_encoding = http_message2.header().GetHeader("Transfer-Encoding");
+    ASSERT_NE(nullptr, transfer_encoding);
+    ASSERT_EQ("chunked", *transfer_encoding);
+}
+
+TEST(HttpMessageTest, parse_http_cookie) {
+    const char* http_request =
+        "GET /CloudApiControl HTTP/1.1\r\n"
+        "Host: api.map.baidu.com\r\n"
+        "Accept: application/json\r\n"
+        "cookie: a=1\r\n"
+        "Cookie: b=2\r\n"
+        "\r\n";
+    butil::IOBuf buf;
+    buf.append(http_request);
+    brpc::HttpMessage http_message;
+    ASSERT_EQ((ssize_t)buf.size(), http_message.ParseFromIOBuf(buf));
+    ASSERT_TRUE(http_message.Completed());
+
+    const std::string* cookie
+        = http_message.header().GetHeader("cookie");
+    ASSERT_NE(nullptr, cookie);
+    ASSERT_EQ("a=1; b=2", *cookie);
+}
+
+TEST(HttpMessageTest, parse_http_set_cookie) {
+    char response[1024] = "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: text/plain\r\n"
+                          "Content-Length: 1024\r\n"
+                          "set-cookie: a=1\r\n"
+                          "Set-Cookie: b=2\r\n"
+                          "\r\n";
+    butil::IOBuf request;
+    request.append(response);
+    brpc::HttpMessage http_message(false, brpc::HTTP_METHOD_HEAD);
+    ASSERT_TRUE(http_message.ParseFromIOBuf(request) >= 0);
+    ASSERT_TRUE(http_message.Completed()) << http_message.stage();
+
+    const std::string* set_cookie = http_message.header().GetHeader("set-cookie");
+    ASSERT_NE(nullptr, set_cookie);
+    ASSERT_EQ("a=1", *set_cookie);
+    std::vector<const std::string*> all_set_cookie
+        = http_message.header().GetAllSetCookieHeader();
+    for (const std::string* sc : all_set_cookie) {
+        ASSERT_NE(nullptr, sc);
+        if (set_cookie == sc) {
+            ASSERT_EQ("a=1", *sc);
+        } else {
+            ASSERT_EQ("b=2", *sc);
+        }
+        if (http_message.header().IsSetCookie(*sc)) {
+        }
+    }
+    int set_cookie_value1_count = 0;
+    int set_cookie_value2_count = 0;
+    for (auto iter = http_message.header().HeaderBegin();
+         iter != http_message.header().HeaderEnd(); ++iter) {
+        if (!http_message.header().IsSetCookie(iter->first)) {
+            continue;
+        }
+        if (iter->second == "b=2") {
+            ++set_cookie_value2_count;
+        } else if (iter->second == "a=1") {
+            ++set_cookie_value1_count;
+        }
+    }
+    ASSERT_EQ(1, set_cookie_value1_count);
+    ASSERT_EQ(1, set_cookie_value2_count);
+}
+
+TEST(HttpMessageTest, cl_and_te) {
+    // https://datatracker.ietf.org/doc/html/rfc2616#section-14.41
+    // If multiple encodings have been applied to an entity, the transfer-
+    // codings MUST be listed in the order in which they were applied.
+    const char* request_buf1 = "POST /chunked_w_content_length HTTP/1.1\r\n"
+                               "Content-Length: 10\r\n"
+                               "Transfer-Encoding: gzip,chunked\r\n"
+                               "\r\n"
+                               "5; ilovew3;whattheluck=aretheseparametersfor\r\nhello\r\n"
+                               "6; blahblah; blah\r\n world\r\n"
+                               "0\r\n"
+                               "\r\n";
+    butil::IOBuf request1;
+    request1.append(request_buf1);
+
+    const char* request_buf2 = "POST /chunked_w_content_length HTTP/1.1\r\n"
+                               "Content-Length: 19\r\n"
+                               "Transfer-Encoding: chunked,gzip\r\n"
+                               "\r\n"
+                               "Message Body sdfsdf";
+    butil::IOBuf request2;
+    request2.append(request_buf2);
+
+    const char* response_buf1 = "HTTP/1.1 200 OK\r\n"
+                                "Content-Length: 10\r\n"
+                                "Transfer-Encoding: gzip,chunked\r\n"
+                                "\r\n"
+                                "5; ilovew3;whattheluck=aretheseparametersfor\r\nhello\r\n"
+                                "6; blahblah; blah\r\n world\r\n"
+                                "0\r\n"
+                                "\r\n";
+    butil::IOBuf response1;
+    response1.append(response_buf1);
+
+    const char* response_buf2 = "HTTP/1.1 200 OK\r\n"
+                                "Content-Length: 19\r\n"
+                                "Transfer-Encoding: chunked,gzip\r\n"
+                                "\r\n"
+                                "Message Body sdfsdf";
+    butil::IOBuf response2;
+    response2.append(response_buf2);
+
+    brpc::FLAGS_allow_chunked_length = false;
+    {
+        brpc::HttpMessage http_message;
+        ASSERT_EQ(http_message.ParseFromIOBuf(request1), -1)
+                        << http_message._parser;
+    }
+    {
+        brpc::HttpMessage http_message;
+        ASSERT_EQ(http_message.ParseFromIOBuf(request2), -1)
+                        << http_message._parser;
+    }
+    {
+        brpc::HttpMessage http_message;
+        ASSERT_EQ(http_message.ParseFromIOBuf(response1), -1)
+                        << http_message._parser;
+    }
+    {
+        brpc::HttpMessage http_message;
+        ASSERT_EQ(http_message.ParseFromIOBuf(response2), -1)
+                        << http_message._parser;
+    }
+
+    brpc::FLAGS_allow_chunked_length = true;
+    {
+        brpc::HttpMessage http_message;
+        ASSERT_EQ(http_message.ParseFromIOBuf(request1), request1.size())
+                        << http_message._parser;
+    }
+    {
+        brpc::HttpMessage http_message;
+        ASSERT_EQ(http_message.ParseFromIOBuf(request2), -1)
+                        << http_message._parser;
+    }
+    {
+        brpc::HttpMessage http_message;
+        ASSERT_EQ(http_message.ParseFromIOBuf(response1), response1.size())
+                        << http_message._parser;
+    }
+    {
+        brpc::HttpMessage http_message;
+        ASSERT_EQ(http_message.ParseFromIOBuf(response2), -1)
+                        << http_message._parser;
+    }
+}
+
 TEST(HttpMessageTest, find_method_property_by_uri) {
     brpc::Server server;
     ASSERT_EQ(0, server.AddService(new test::EchoService(),
@@ -313,6 +509,57 @@ TEST(HttpMessageTest, http_header) {
     header.RemoveHeader("key1");
     ASSERT_FALSE(header.GetHeader("key1"));
 
+    ASSERT_FALSE(header.GetHeader(brpc::HttpHeader::COOKIE));
+    header.AppendHeader(brpc::HttpHeader::COOKIE, "value1=1");
+    value = header.GetHeader(brpc::HttpHeader::COOKIE);
+    ASSERT_TRUE(value && *value == "value1=1");
+    header.AppendHeader(brpc::HttpHeader::COOKIE, "value2=2");
+    value = header.GetHeader(brpc::HttpHeader::COOKIE);
+    ASSERT_TRUE(value && *value == "value1=1; value2=2");
+    header.SetHeader(brpc::HttpHeader::COOKIE, "value3");
+    value = header.GetHeader(brpc::HttpHeader::COOKIE);
+    ASSERT_TRUE(value && *value == "value3");
+    header.RemoveHeader(brpc::HttpHeader::COOKIE);
+    ASSERT_FALSE(header.GetHeader(brpc::HttpHeader::COOKIE));
+
+    std::string set_cookie_value1 = "a=1";
+    std::string set_cookie_value2 = "b=2";
+    std::string set_cookie_value3 = "c=3";
+    ASSERT_FALSE(header.GetHeader(brpc::HttpHeader::SET_COOKIE));
+    header.SetHeader(brpc::HttpHeader::SET_COOKIE, set_cookie_value1);
+    value = header.GetHeader(brpc::HttpHeader::SET_COOKIE);
+    ASSERT_TRUE(value && *value == set_cookie_value1);
+    header.AppendHeader(brpc::HttpHeader::SET_COOKIE, set_cookie_value2);
+    value = header.GetHeader(brpc::HttpHeader::SET_COOKIE);
+    ASSERT_TRUE(value && *value == set_cookie_value1);
+    header.SetHeader(brpc::HttpHeader::SET_COOKIE, set_cookie_value3);
+    value = header.GetHeader(brpc::HttpHeader::SET_COOKIE);
+    ASSERT_TRUE(value && *value == set_cookie_value3);
+    std::vector<const std::string*> all_set_cookie
+        = header.GetAllSetCookieHeader();
+    ASSERT_EQ(2u, all_set_cookie.size());
+    for (const std::string* sc : all_set_cookie) {
+        ASSERT_TRUE(sc);
+        ASSERT_TRUE(*sc == set_cookie_value2 || *sc == set_cookie_value3);
+    }
+    int set_cookie_value2_count = 0;
+    int set_cookie_value3_count = 0;
+    for (auto iter = header.HeaderBegin(); iter != header.HeaderEnd(); ++iter) {
+        if (!header.IsSetCookie(brpc::HttpHeader::SET_COOKIE)) {
+            continue;
+        }
+        if (iter->second == set_cookie_value2) {
+            ++set_cookie_value2_count;
+        } else if (iter->second == set_cookie_value3) {
+            ++set_cookie_value3_count;
+        }
+    }
+    ASSERT_EQ(1, set_cookie_value2_count);
+    ASSERT_EQ(1, set_cookie_value3_count);
+    header.RemoveHeader(brpc::HttpHeader::SET_COOKIE);
+    ASSERT_FALSE(header.GetHeader(brpc::HttpHeader::SET_COOKIE));
+    ASSERT_EQ(header._first_set_cookie, nullptr);
+
     ASSERT_EQ(brpc::HTTP_METHOD_GET, header.method());
     header.set_method(brpc::HTTP_METHOD_POST);
     ASSERT_EQ(brpc::HTTP_METHOD_POST, header.method());
@@ -363,22 +610,27 @@ TEST(HttpMessageTest, serialize_http_request) {
     // user-set accept
     header.SetHeader("accePT"/*intended uppercase*/, "blahblah");
     MakeRawHttpRequest(&request, &header, ep, &content);
-    ASSERT_EQ("POST / HTTP/1.1\r\nContent-Length: 4\r\naccePT: blahblah\r\nFoo: Bar\r\nHost: MyHost: 4321\r\nUser-Agent: brpc/1.0 curl/7.0\r\n\r\ndata", request);
+    ASSERT_EQ("POST / HTTP/1.1\r\nContent-Length: 4\r\nFoo: Bar\r\naccePT: blahblah\r\nHost: MyHost: 4321\r\nUser-Agent: brpc/1.0 curl/7.0\r\n\r\ndata", request);
 
     // user-set UA
     header.SetHeader("user-AGENT", "myUA");
     MakeRawHttpRequest(&request, &header, ep, &content);
-    ASSERT_EQ("POST / HTTP/1.1\r\nContent-Length: 4\r\naccePT: blahblah\r\nuser-AGENT: myUA\r\nFoo: Bar\r\nHost: MyHost: 4321\r\n\r\ndata", request);
+    ASSERT_EQ("POST / HTTP/1.1\r\nContent-Length: 4\r\nFoo: Bar\r\naccePT: blahblah\r\nHost: MyHost: 4321\r\nuser-AGENT: myUA\r\n\r\ndata", request);
 
     // user-set Authorization
     header.SetHeader("authorization", "myAuthString");
     MakeRawHttpRequest(&request, &header, ep, &content);
-    ASSERT_EQ("POST / HTTP/1.1\r\nContent-Length: 4\r\naccePT: blahblah\r\nuser-AGENT: myUA\r\nauthorization: myAuthString\r\nFoo: Bar\r\nHost: MyHost: 4321\r\n\r\ndata", request);
+    ASSERT_EQ("POST / HTTP/1.1\r\nContent-Length: 4\r\nFoo: Bar\r\naccePT: blahblah\r\nHost: MyHost: 4321\r\nuser-AGENT: myUA\r\nauthorization: myAuthString\r\n\r\ndata", request);
 
-    // GET does not serialize content
-    header.set_method(brpc::HTTP_METHOD_GET);
+    header.SetHeader("Transfer-Encoding", "chunked");
     MakeRawHttpRequest(&request, &header, ep, &content);
-    ASSERT_EQ("GET / HTTP/1.1\r\naccePT: blahblah\r\nuser-AGENT: myUA\r\nauthorization: myAuthString\r\nFoo: Bar\r\nHost: MyHost: 4321\r\n\r\n", request);
+    ASSERT_EQ("POST / HTTP/1.1\r\nFoo: Bar\r\naccePT: blahblah\r\nTransfer-Encoding: chunked\r\nHost: MyHost: 4321\r\nuser-AGENT: myUA\r\nauthorization: myAuthString\r\n\r\ndata", request);
+
+    // GET does not serialize content and user-set content-length is ignored.
+    header.set_method(brpc::HTTP_METHOD_GET);
+    header.SetHeader("Content-Length", "100");
+    MakeRawHttpRequest(&request, &header, ep, &content);
+    ASSERT_EQ("GET / HTTP/1.1\r\nFoo: Bar\r\naccePT: blahblah\r\nHost: MyHost: 4321\r\nuser-AGENT: myUA\r\nauthorization: myAuthString\r\n\r\n", request);
 }
 
 TEST(HttpMessageTest, serialize_http_response) {
@@ -389,19 +641,98 @@ TEST(HttpMessageTest, serialize_http_response) {
     butil::IOBuf content;
     content.append("data");
     MakeRawHttpResponse(&response, &header, &content);
-    ASSERT_EQ("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nFoo: Bar\r\n\r\ndata", response);
-    // content is cleared.
+    ASSERT_EQ("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nFoo: Bar\r\n\r\ndata", response)
+        << butil::ToPrintable(response);
+    // Content is cleared.
     CHECK(content.empty());
 
-    // user-set content-length is ignored.
+    // NULL content
+    header.SetHeader("Content-Length", "100");
+    MakeRawHttpResponse(&response, &header, NULL);
+    ASSERT_EQ("HTTP/1.1 200 OK\r\nFoo: Bar\r\nContent-Length: 100\r\n\r\n", response)
+        << butil::ToPrintable(response);
+
+    header.SetHeader("Transfer-Encoding", "chunked");
+    MakeRawHttpResponse(&response, &header, NULL);
+    ASSERT_EQ("HTTP/1.1 200 OK\r\nFoo: Bar\r\nTransfer-Encoding: chunked\r\n\r\n", response)
+                    << butil::ToPrintable(response);
+    header.RemoveHeader("Transfer-Encoding");
+
+    // User-set content-length is ignored.
     content.append("data2");
+    MakeRawHttpResponse(&response, &header, &content);
+    ASSERT_EQ("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nFoo: Bar\r\n\r\ndata2", response)
+        << butil::ToPrintable(response);
+
+    header.SetHeader("Content-Length", "100");
+    header.SetHeader("Transfer-Encoding", "chunked");
+    MakeRawHttpResponse(&response, &header, NULL);
+    ASSERT_EQ("HTTP/1.1 200 OK\r\nFoo: Bar\r\nTransfer-Encoding: chunked\r\n\r\n", response)
+                    << butil::ToPrintable(response);
+    header.RemoveHeader("Transfer-Encoding");
+
+    // User-set content-length and transfer-encoding is ignored when status code is 204 or 1xx.
+    // 204 No Content.
+    header.SetHeader("Content-Length", "100");
+    header.SetHeader("Transfer-Encoding", "chunked");
+    header.set_status_code(brpc::HTTP_STATUS_NO_CONTENT);
+    MakeRawHttpResponse(&response, &header, &content);
+    ASSERT_EQ("HTTP/1.1 204 No Content\r\nFoo: Bar\r\n\r\n", response);
+    // 101 Continue
+    header.SetHeader("Content-Length", "100");
+    header.SetHeader("Transfer-Encoding", "chunked");
+    header.set_status_code(brpc::HTTP_STATUS_CONTINUE);
+    MakeRawHttpResponse(&response, &header, &content);
+    ASSERT_EQ("HTTP/1.1 100 Continue\r\nFoo: Bar\r\n\r\n", response)
+        << butil::ToPrintable(response);
+
+    // when request method is HEAD:
+    // 1. There isn't user-set content-length, length of content is used.
+    header.set_method(brpc::HTTP_METHOD_HEAD);
+    header.set_status_code(brpc::HTTP_STATUS_OK);content.append("data2");
+    MakeRawHttpResponse(&response, &header, &content);
+    ASSERT_EQ("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nFoo: Bar\r\n\r\n", response)
+        << butil::ToPrintable(response);
+    // 2. User-set content-length is not ignored .
     header.SetHeader("Content-Length", "100");
     MakeRawHttpResponse(&response, &header, &content);
-    ASSERT_EQ("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nFoo: Bar\r\n\r\ndata2", response);
+    ASSERT_EQ("HTTP/1.1 200 OK\r\nFoo: Bar\r\nContent-Length: 100\r\n\r\n", response)
+        << butil::ToPrintable(response);
+}
 
-    // null content
-    MakeRawHttpResponse(&response, &header, NULL);
-    ASSERT_EQ("HTTP/1.1 200 OK\r\nFoo: Bar\r\n\r\n", response);
+TEST(HttpMessageTest, http_1_1_request_without_host) {
+    brpc::FLAGS_allow_http_1_1_request_without_host = false;
+    {
+        butil::IOBuf request;
+        request.append("GET /service/method HTTP/1.1\r\n"
+                       "Content-Type: text/plain\r\n\r\n");
+
+        brpc::HttpMessage http_message;
+        ASSERT_TRUE(http_message.ParseFromIOBuf(request) < 0);
+    }
+    {
+        butil::IOBuf request;
+        request.append("GET http://baidu.com/service/method HTTP/1.1\r\n"
+                       "Content-Type: text/plain\r\n\r\n");
+
+        brpc::HttpMessage http_message;
+        ASSERT_TRUE(http_message.ParseFromIOBuf(request) >= 0);
+        ASSERT_TRUE(http_message.Completed());
+        ASSERT_EQ("text/plain", http_message.header().content_type());
+    }
+    {
+        butil::IOBuf request;
+        request.append("GET /service/method HTTP/1.1\r\n"
+                       "Content-Type: text/plain\r\n"
+                       "Host: baidu.com\r\n\r\n");
+
+        brpc::HttpMessage http_message;
+        ASSERT_GE(http_message.ParseFromIOBuf(request), 0);
+        ASSERT_GE(http_message.ParseFromArray(NULL, 0), 0);
+        ASSERT_TRUE(http_message.Completed());
+        ASSERT_EQ("text/plain", http_message.header().content_type());
+    }
+    brpc::FLAGS_allow_http_1_1_request_without_host = true;
 }
 
 } //namespace

@@ -80,13 +80,13 @@ NamingServiceThread::Actions::~Actions() {
 void NamingServiceThread::Actions::AddServers(
     const std::vector<ServerNode>&) {
     // FIXME(gejun)
-    abort();
+    RELEASE_ASSERT_VERBOSE(false, "Not implemented");
 }
 
 void NamingServiceThread::Actions::RemoveServers(
     const std::vector<ServerNode>&) {
     // FIXME(gejun)
-    abort();
+    RELEASE_ASSERT_VERBOSE(false, "Not implemented");
 }
 
 void NamingServiceThread::Actions::ResetServers(
@@ -441,9 +441,7 @@ int GetNamingServiceThread(
                 return -1;
             }
             if (g_nsthread_map->init(64) != 0) {
-                mu.unlock();
-                LOG(ERROR) << "Fail to init g_nsthread_map";
-                return -1;
+                LOG(WARNING) << "Fail to init g_nsthread_map";
             }
         }
         NamingServiceThread*& ptr = (*g_nsthread_map)[key];

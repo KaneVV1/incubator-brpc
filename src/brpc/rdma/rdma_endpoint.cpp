@@ -60,8 +60,6 @@ DEFINE_bool(rdma_trace_verbose, false, "Print log message verbosely");
 BRPC_VALIDATE_GFLAG(rdma_trace_verbose, brpc::PassValidate);
 
 static const size_t IOBUF_BLOCK_HEADER_LEN = 32; // implementation-dependent
-static const size_t IOBUF_BLOCK_DEFAULT_PAYLOAD =
-        butil::IOBuf::DEFAULT_BLOCK_SIZE - IOBUF_BLOCK_HEADER_LEN;
 
 // DO NOT change this value unless you know the safe value!!!
 // This is the number of reserved WRs in SQ/RQ for pure ACK.
@@ -71,22 +69,22 @@ static const size_t RESERVED_WR_NUM = 3;
 // message length (2B)
 // hello version (2B)
 // impl version (2B): 0 means should use tcp
-// block size (2B)
+// block size (4B)
 // sq size (2B)
 // rq size (2B)
 // GID (16B)
 // QP number (4B)
 static const char* MAGIC_STR = "RDMA";
 static const size_t MAGIC_STR_LEN = 4;
-static const size_t HELLO_MSG_LEN_MIN = 38;
-static const size_t HELLO_MSG_LEN_MAX = 4096;
+static const size_t HELLO_MSG_LEN_MIN = 40;
+// static const size_t HELLO_MSG_LEN_MAX = 4096;
 static const size_t ACK_MSG_LEN = 4;
-static uint16_t g_rdma_hello_msg_len = 38;  // In Byte
-static uint16_t g_rdma_hello_version = 1;
+static uint16_t g_rdma_hello_msg_len = 40;  // In Byte
+static uint16_t g_rdma_hello_version = 2;
 static uint16_t g_rdma_impl_version = 1;
-static uint16_t g_rdma_recv_block_size = 0;
+static uint32_t g_rdma_recv_block_size = 0;
 
-static const uint32_t MAX_INLINE_DATA = 64;
+// static const uint32_t MAX_INLINE_DATA = 64;
 static const uint8_t MAX_HOP_LIMIT = 16;
 static const uint8_t TIMEOUT = 14;
 static const uint8_t RETRY_CNT = 7;
@@ -105,7 +103,7 @@ struct HelloMessage {
     uint16_t msg_len;
     uint16_t hello_ver;
     uint16_t impl_ver;
-    uint16_t block_size;
+    uint32_t block_size;
     uint16_t sq_size;
     uint16_t rq_size;
     uint16_t lid;
@@ -118,7 +116,9 @@ void HelloMessage::Serialize(void* data) const {
     *(current_pos++) = butil::HostToNet16(msg_len);
     *(current_pos++) = butil::HostToNet16(hello_ver);
     *(current_pos++) = butil::HostToNet16(impl_ver);
-    *(current_pos++) = butil::HostToNet16(block_size);
+    uint32_t* block_size_pos = (uint32_t*)current_pos;
+    *block_size_pos = butil::HostToNet32(block_size);
+    current_pos += 2; // move forward 4 Bytes
     *(current_pos++) = butil::HostToNet16(sq_size);
     *(current_pos++) = butil::HostToNet16(rq_size);
     *(current_pos++) = butil::HostToNet16(lid);
@@ -132,7 +132,8 @@ void HelloMessage::Deserialize(void* data) {
     msg_len = butil::NetToHost16(*current_pos++);
     hello_ver = butil::NetToHost16(*current_pos++);
     impl_ver = butil::NetToHost16(*current_pos++);
-    block_size = butil::NetToHost16(*current_pos++);
+    block_size = butil::NetToHost32(*(uint32_t*)current_pos);
+    current_pos += 2; // move forward 4 Bytes
     sq_size = butil::NetToHost16(*current_pos++);
     rq_size = butil::NetToHost16(*current_pos++);
     lid = butil::NetToHost16(*current_pos++);
@@ -1018,7 +1019,7 @@ int RdmaEndpoint::PostRecv(uint32_t num, bool zerocopy) {
                 PLOG(WARNING) << "Fail to allocate rbuf";
                 return -1;
             } else {
-                CHECK(size == g_rdma_recv_block_size) << size;
+                CHECK(static_cast<uint32_t>(size) == g_rdma_recv_block_size) << size;
             }
         }
         if (DoPostRecv(_rbuf_data[_rq_received], g_rdma_recv_block_size) < 0) {
@@ -1254,7 +1255,7 @@ void RdmaEndpoint::DeallocateResources() {
         if (_resource->comp_channel) {
             // destroy comp_channel will destroy this fd
             // so that we should remove it from epoll fd first
-            GetGlobalEventDispatcher(fd).RemoveConsumer(fd);
+            _socket->_io_event.RemoveConsumer(fd);
             fd = -1;
             if (IbvDestroyCompChannel(_resource->comp_channel) < 0) {
                 PLOG(WARNING) << "Fail to destroy CQ channel";
@@ -1270,7 +1271,7 @@ void RdmaEndpoint::DeallocateResources() {
         if (Socket::Address(_cq_sid, &s) == 0) {
             s->_user = NULL;  // do not release user (this RdmaEndpoint)
             if (fd >= 0) {
-                GetGlobalEventDispatcher(fd).RemoveConsumer(fd);
+                _socket->_io_event.RemoveConsumer(fd);
             }
             s->_fd = -1;  // already remove fd from epoll fd
             s->SetFailed();

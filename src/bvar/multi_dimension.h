@@ -29,8 +29,6 @@
 
 namespace bvar {
 
-constexpr uint64_t MAX_MULTI_DIMENSION_STATS_COUNT = 20000;
-
 template <typename  T>
 class MultiDimension : public MVariable {
 public:
@@ -88,6 +86,9 @@ public:
     // Remove stat so those not count and dump
     void delete_stats(const key_type& labels_value);
 
+    // Remove all stat
+    void clear_stats();
+
     // True if bvar pointer exists
     bool has_stats(const key_type& labels_value);
 
@@ -131,10 +132,15 @@ private:
     
     // Remove all stats so those not count and dump
     void delete_stats();
+
+    void set_max_stats_count(size_t max_stats_count) {
+        _max_stats_count = max_stats_count;
+    }
     
     static size_t init_flatmap(MetricMap& bg);
     
 private:
+    size_t _max_stats_count;
     MetricMapDBD _metric_map;
 };
 

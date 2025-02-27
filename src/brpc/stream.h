@@ -28,6 +28,7 @@ namespace brpc {
 class Controller;
 
 typedef SocketId StreamId;
+using StreamIds = std::vector<StreamId>;
 const StreamId INVALID_STREAM_ID = (StreamId)-1L;
 
 namespace detail {
@@ -44,7 +45,11 @@ public:
                                      butil::IOBuf *const messages[], 
                                      size_t size) = 0;
     virtual void on_idle_timeout(StreamId id) = 0;
-    virtual void on_closed(StreamId id) = 0; 
+    virtual void on_closed(StreamId id) = 0;
+    // `on_failed` will be called  before `on_closed`
+    // when the stream is closed abnormally.
+    virtual void on_failed(StreamId id, int error_code,
+                           const std::string& error_text) {}
 };
 
 struct StreamOptions {
@@ -76,10 +81,21 @@ struct StreamOptions {
     // default: 128
     size_t messages_in_batch;
 
-    // Handle input message, if handler is NULL, the remote side is not allowd to
+    // Handle input message, if handler is NULL, the remote side is not allowed to
     // write any message, who will get EBADF on writting
     // default: NULL
     StreamInputHandler* handler;
+};
+
+struct StreamWriteOptions {
+    StreamWriteOptions() : write_in_background(false) {}
+
+    // Write message to socket in background thread.
+    // Provides batch write effect and better performance in situations when
+    // you are continually issuing lots of StreamWrite or async RPC calls in
+    // only one thread. Otherwise, each StreamWrite directly writes message into
+    // socket and brings poor performance.
+    bool write_in_background;
 };
 
 // [Called at the client side]
@@ -90,6 +106,14 @@ struct StreamOptions {
 int StreamCreate(StreamId* request_stream, Controller &cntl,
                  const StreamOptions* options);
 
+// [Called at the client side for creating multiple streams]
+// Create streams at client-side along with the |cntl|, which will be connected
+// when receiving the response with streams from server-side. If |options| is
+// NULL, the stream will be created with default options
+// Return 0 on success, -1 otherwise
+int StreamCreate(StreamIds& request_streams, int request_stream_size, Controller& cntl,
+                 const StreamOptions* options);
+
 // [Called at the server side]
 // Accept the stream. If client didn't create a stream with the request 
 // (cntl.has_remote_stream() returns false), this method would fail.
@@ -97,6 +121,12 @@ int StreamCreate(StreamId* request_stream, Controller &cntl,
 int StreamAccept(StreamId* response_stream, Controller &cntl,
                  const StreamOptions* options);
 
+// [Called at the server side for accepting multiple streams]
+// Accept the streams. If client didn't create streams with the request
+// (cntl.has_remote_stream() returns false), this method would fail.
+// Return 0 on success, -1 otherwise.
+int StreamAccept(StreamIds& response_stream, Controller& cntl,
+                 const StreamOptions* options);
 // Write |message| into |stream_id|. The remote-side handler will received the 
 // message by the written order
 // Returns 0 on success, errno otherwise
@@ -104,7 +134,8 @@ int StreamAccept(StreamId* response_stream, Controller &cntl,
 //  - EAGAIN: |stream_id| is created with positive |max_buf_size| and buf size
 //            which the remote side hasn't consumed yet excceeds the number.
 //  - EINVAL: |stream_id| is invalied or has been closed
-int StreamWrite(StreamId stream_id, const butil::IOBuf &message);
+int StreamWrite(StreamId stream_id, const butil::IOBuf &message,
+                const StreamWriteOptions* options = NULL);
 
 // Write util the pending buffer size is less than |max_buf_size| or orrur
 // occurs

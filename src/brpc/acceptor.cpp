@@ -40,7 +40,8 @@ Acceptor::Acceptor(bthread_keytable_pool_t* pool)
     , _empty_cond(&_map_mutex)
     , _force_ssl(false)
     , _ssl_ctx(NULL) 
-    , _use_rdma(false) {
+    , _use_rdma(false)
+    , _bthread_tag(BTHREAD_TAG_DEFAULT) {
 }
 
 Acceptor::~Acceptor() {
@@ -75,8 +76,9 @@ int Acceptor::StartAccept(int listened_fd, int idle_timeout_sec,
         return -1;
     }
     if (idle_timeout_sec > 0) {
-        if (bthread_start_background(&_close_idle_tid, NULL,
-                                     CloseIdleConnections, this) != 0) {
+        bthread_attr_t tmp = BTHREAD_ATTR_NORMAL;
+        tmp.tag = _bthread_tag;
+        if (bthread_start_background(&_close_idle_tid, &tmp, CloseIdleConnections, this) != 0) {
             LOG(FATAL) << "Fail to start bthread";
             return -1;
         }
@@ -90,6 +92,7 @@ int Acceptor::StartAccept(int listened_fd, int idle_timeout_sec,
     SocketOptions options;
     options.fd = listened_fd;
     options.user = this;
+    options.bthread_tag = _bthread_tag;
     options.on_edge_triggered_events = OnNewConnections;
     if (Socket::Create(options, &_acception_id) != 0) {
         // Close-idle-socket thread will be stopped inside destructor
@@ -162,9 +165,8 @@ void Acceptor::StopAccept(int /*closewait_ms*/) {
 
 int Acceptor::Initialize() {
     if (_socket_map.init(INITIAL_CONNECTION_CAP) != 0) {
-        LOG(FATAL) << "Fail to initialize FlatMap, size="
+        LOG(WARNING) << "Fail to initialize FlatMap, size="
                    << INITIAL_CONNECTION_CAP;
-        return -1;
     }
     return 0;    
 }
@@ -214,10 +216,6 @@ void Acceptor::ListConnections(std::vector<SocketId>* conn_list,
     conn_list->reserve(ConnectionCount() + 10);
 
     std::unique_lock<butil::Mutex> mu(_map_mutex);
-    if (!_socket_map.initialized()) {
-        // Optional. Uninitialized FlatMap should be iteratable.
-        return;
-    }
     // Copy all the SocketId (protected by mutex) into a temporary
     // container to avoid dealing with sockets inside the mutex.
     size_t ntotal = 0;
@@ -295,6 +293,7 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
             options.on_edge_triggered_events = InputMessenger::OnNewMessages;
         }
         options.use_rdma = am->_use_rdma;
+        options.bthread_tag = am->_bthread_tag;
         if (Socket::Create(options, &socket_id) != 0) {
             LOG(ERROR) << "Fail to create Socket";
             continue;
@@ -317,7 +316,7 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
                 // Always add this socket into `_socket_map' whether it
                 // has been `SetFailed' or not, whether `Acceptor' is
                 // running or not. Otherwise, `Acceptor::BeforeRecycle'
-                // may be called (inside Socket::OnRecycle) after `Acceptor'
+                // may be called (inside Socket::BeforeRecycled) after `Acceptor'
                 // has been destroyed
                 am->_socket_map.insert(socket_id, ConnectStatistics());
             }

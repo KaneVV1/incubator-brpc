@@ -48,6 +48,11 @@
 // Force linking the .o in UT (which analysis deps by inclusions)
 #include "brpc/parallel_channel.h"
 #include "brpc/selective_channel.h"
+#include "bthread/task_group.h"
+
+namespace bthread {
+extern BAIDU_THREAD_LOCAL TaskGroup* tls_task_group;
+}
 
 // This is the only place that both client/server must link, so we put
 // registrations of errno here.
@@ -75,6 +80,7 @@ BAIDU_REGISTER_ERRNO(brpc::ELOGOFF, "Server is stopping");
 BAIDU_REGISTER_ERRNO(brpc::ELIMIT, "Reached server's max_concurrency");
 BAIDU_REGISTER_ERRNO(brpc::ECLOSE, "Close socket initiatively");
 BAIDU_REGISTER_ERRNO(brpc::EITP, "Bad Itp response");
+BAIDU_REGISTER_ERRNO(brpc::ESHUTDOWNWRITE, "Shutdown write of socket");
 
 #if BRPC_WITH_RDMA
 BAIDU_REGISTER_ERRNO(brpc::ERDMA, "RDMA verbs error");
@@ -120,6 +126,7 @@ const Controller* GetSubControllerOfSelectiveChannel(
     const RPCSender* sender, int index);
 
 DECLARE_bool(usercode_in_pthread);
+DECLARE_bool(usercode_in_coroutine);
 static const int MAX_RETRY_COUNT = 1000;
 static bvar::Adder<int64_t>* g_ncontroller = NULL;
 
@@ -204,6 +211,8 @@ void Controller::ResetNonPods() {
     _request_buf.clear();
     delete _http_request;
     delete _http_response;
+    delete _request_user_fields;
+    delete _response_user_fields;
     _request_attachment.clear();
     _response_attachment.clear();
     if (_wpa) {
@@ -223,6 +232,7 @@ void Controller::ResetNonPods() {
     }
     delete _remote_stream_settings;
     _thrift_method_name.clear();
+    _after_rpc_resp_fn = nullptr;
 
     CHECK(_unfinished_call == NULL);
 }
@@ -248,6 +258,7 @@ void Controller::ResetPods() {
     _connection_type = CONNECTION_TYPE_UNKNOWN;
     _timeout_ms = UNSET_MAGIC_NUM;
     _backup_request_ms = UNSET_MAGIC_NUM;
+    _backup_request_policy = NULL;
     _connect_timeout_ms = UNSET_MAGIC_NUM;
     _real_timeout_ms = UNSET_MAGIC_NUM;
     _deadline_us = -1;
@@ -277,8 +288,10 @@ void Controller::ResetPods() {
     _idl_result = IDL_VOID_RESULT;
     _http_request = NULL;
     _http_response = NULL;
-    _request_stream = INVALID_STREAM_ID;
-    _response_stream = INVALID_STREAM_ID;
+    _request_user_fields = NULL;
+    _response_user_fields = NULL;
+    _request_streams.clear();
+    _response_streams.clear();
     _remote_stream_settings = NULL;
     _auth_flags = 0;
 }
@@ -330,6 +343,16 @@ void Controller::set_backup_request_ms(int64_t timeout_ms) {
         _backup_request_ms = 0x7fffffff;
         LOG(WARNING) << "backup_request_ms is limited to 0x7fffffff (roughly 24 days)";
     }
+}
+
+int64_t Controller::backup_request_ms() const {
+    int timeout_ms = NULL != _backup_request_policy ?
+        _backup_request_policy->GetBackupRequestMs(this) : _backup_request_ms;
+    if (timeout_ms > 0x7fffffff) {
+        timeout_ms = 0x7fffffff;
+        LOG(WARNING) << "backup_request_ms is limited to 0x7fffffff (roughly 24 days)";
+    }
+    return timeout_ms;
 }
 
 void Controller::set_max_retry(int max_retry) {
@@ -541,13 +564,13 @@ void Controller::NotifyOnCancel(google::protobuf::Closure* callback) {
         LOG(FATAL) << "NotifyCancel a single call more than once!";
         return;
     }
-    if (bthread_id_create(&_oncancel_id, callback, RunOnCancel) != 0) {
-        PLOG(FATAL) << "Fail to create bthread_id";
-        return;
-    }
     SocketUniquePtr sock;
     if (Socket::Address(_current_call.peer_id, &sock) != 0) {
         // Connection already broken
+        return;
+    }
+    if (bthread_id_create(&_oncancel_id, callback, RunOnCancel) != 0) {
+        PLOG(FATAL) << "Fail to create bthread_id";
         return;
     }
     sock->NotifyOnFailed(_oncancel_id);  // Always succeed
@@ -594,6 +617,13 @@ void Controller::OnVersionedRPCReturned(const CompletionInfo& info,
         goto END_OF_RPC;
     }
     if (_error_code == EBACKUPREQUEST) {
+        if (NULL != _backup_request_policy && !_backup_request_policy->DoBackup(this)) {
+            // No need to do backup request.
+            _error_code = saved_error;
+            CHECK_EQ(0, bthread_id_unlock(info.id));
+            return;
+        }
+
         // Reset timeout if needed
         int rc = 0;
         if (timeout_ms() >= 0) {
@@ -627,37 +657,54 @@ void Controller::OnVersionedRPCReturned(const CompletionInfo& info,
         ++_current_call.nretry;
         add_flag(FLAGS_BACKUP_REQUEST);
         return IssueRPC(butil::gettimeofday_us());
-    } else if (_retry_policy ? _retry_policy->DoRetry(this)
-               : DefaultRetryPolicy()->DoRetry(this)) {
-        // The error must come from _current_call because:
-        //  * we intercepted error from _unfinished_call in OnVersionedRPCReturned
-        //  * ERPCTIMEDOUT/ECANCELED are not retrying error by default.
-        CHECK_EQ(current_id(), info.id) << "error_code=" << _error_code;
-        if (!SingleServer()) {
-            if (_accessed == NULL) {
-                _accessed = ExcludedServers::Create(
-                    std::min(_max_retry, RETRY_AVOIDANCE));
-                if (NULL == _accessed) {
-                    SetFailed(ENOMEM, "Fail to create ExcludedServers");
-                    goto END_OF_RPC;
+    } else {
+        auto retry_policy = _retry_policy ? _retry_policy : DefaultRetryPolicy();
+        if (retry_policy->DoRetry(this)) {
+            // The error must come from _current_call because:
+            //  * we intercepted error from _unfinished_call in OnVersionedRPCReturned
+            //  * ERPCTIMEDOUT/ECANCELED are not retrying error by default.
+            CHECK_EQ(current_id(), info.id) << "error_code=" << _error_code;
+            if (!SingleServer()) {
+                if (_accessed == NULL) {
+                    _accessed = ExcludedServers::Create(
+                            std::min(_max_retry, RETRY_AVOIDANCE));
+                    if (NULL == _accessed) {
+                        SetFailed(ENOMEM, "Fail to create ExcludedServers");
+                        goto END_OF_RPC;
+                    }
+                }
+                _accessed->Add(_current_call.peer_id);
+            }
+            _current_call.OnComplete(this, _error_code, info.responded, false);
+            ++_current_call.nretry;
+            // Clear http responses before retrying, otherwise the response may
+            // be mixed with older (and undefined) stuff. This is actually not
+            // done before r32008.
+            if (_http_response) {
+                _http_response->Clear();
+            }
+            response_attachment().clear();
+
+            // Retry backoff.
+            bthread::TaskGroup* g = bthread::tls_task_group;
+            int64_t backoff_time_us = retry_policy->GetBackoffTimeMs(this) * 1000L;
+            if (backoff_time_us > 0 &&
+                backoff_time_us < _deadline_us - butil::gettimeofday_us()) {
+                // No need to do retry backoff when the backoff time is longer than the remaining rpc time.
+                if (retry_policy->CanRetryBackoffInPthread() ||
+                    (g && !g->is_current_pthread_task())) {
+                    bthread_usleep(backoff_time_us);
+                } else {
+                    LOG(WARNING) << "`CanRetryBackoffInPthread()' returns false, "
+                                    "skip retry backoff in pthread.";
                 }
             }
-            _accessed->Add(_current_call.peer_id);
+            return IssueRPC(butil::gettimeofday_us());
         }
-        _current_call.OnComplete(this, _error_code, info.responded, false);
-        ++_current_call.nretry;
-        // Clear http responses before retrying, otherwise the response may
-        // be mixed with older (and undefined) stuff. This is actually not
-        // done before r32008.
-        if (_http_response) {
-            _http_response->Clear();
-        }
-        response_attachment().clear();
-        return IssueRPC(butil::gettimeofday_us());
     }
 
 END_OF_RPC:
-    if (new_bthread) {
+    if (new_bthread && !FLAGS_usercode_in_coroutine) {
         // [ Essential for -usercode_in_pthread=true ]
         // When -usercode_in_pthread is on, the reserved threads (set by
         // -usercode_backup_threads) may all block on bthread_id_lock in
@@ -940,6 +987,14 @@ void Controller::EndRPC(const CompletionInfo& info) {
         CHECK_EQ(0, bthread_id_unlock_and_destroy(saved_cid));
     }
 }
+
+void Controller::OnRPCEnd(int64_t end_time_us) {
+    _end_time_us = end_time_us;
+    if (NULL != _backup_request_policy) {
+        _backup_request_policy->OnRPCEnd(this);
+    }
+}
+
 void Controller::RunDoneInBackupThread(void* arg) {
     static_cast<Controller*>(arg)->DoneInBackupThread();
 }
@@ -1171,6 +1226,7 @@ void Controller::IssueRPC(int64_t start_realtime_us) {
     wopt.pipelined_count = _pipelined_count;
     wopt.auth_flags = _auth_flags;
     wopt.ignore_eovercrowded = has_flag(FLAGS_IGNORE_EOVERCROWDED);
+    wopt.write_in_background = write_to_socket_in_background();
     int rc;
     size_t packet_size = 0;
     if (user_packet_guard) {
@@ -1238,8 +1294,25 @@ int Controller::HandleSocketFailed(bthread_id_t id, void* data, int error_code,
         cntl->SetFailed(error_code, "%s @%s", berror(error_code),
                         butil::endpoint2str(cntl->remote_side()).c_str());
     }
-    CompletionInfo info = { id, false };
-    cntl->OnVersionedRPCReturned(info, true, saved_error);
+
+    struct OnVersionedRPCReturnedArgs {
+        bthread_id_t id;
+        Controller* cntl;
+        int error;
+    };
+    auto func = [](void* p) -> void* {
+        std::unique_ptr<OnVersionedRPCReturnedArgs> args(static_cast<OnVersionedRPCReturnedArgs*>(p));
+        CompletionInfo info = { args->id, false };
+        args->cntl->OnVersionedRPCReturned(info, true, args->error);
+        return NULL;
+    };
+
+    auto* args = new OnVersionedRPCReturnedArgs{ id, cntl, saved_error };
+    bthread_t tid;
+    // RetryPolicy may block current bthread, so start a new bthread to run OnVersionedRPCReturned
+    if (!cntl->_retry_policy || bthread_start_background(&tid, NULL, func, args) != 0) {
+        func(args);
+    }
     return 0;
 }
 
@@ -1266,6 +1339,7 @@ CallId Controller::call_id() {
 void Controller::SaveClientSettings(ClientSettings* s) const {
     s->timeout_ms = _timeout_ms;
     s->backup_request_ms = _backup_request_ms;
+    s->backup_request_policy = _backup_request_policy;
     s->max_retry = _max_retry;
     s->tos = _tos;
     s->connection_type = _connection_type;
@@ -1278,6 +1352,7 @@ void Controller::SaveClientSettings(ClientSettings* s) const {
 void Controller::ApplyClientSettings(const ClientSettings& s) {
     set_timeout_ms(s.timeout_ms);
     set_backup_request_ms(s.backup_request_ms);
+    set_backup_request_policy(s.backup_request_policy);
     set_max_retry(s.max_retry);
     set_type_of_service(s.tos);
     set_connection_type(s.connection_type);
@@ -1323,33 +1398,54 @@ void* Controller::session_local_data() {
 }
 
 void Controller::HandleStreamConnection(Socket *host_socket) {
-    if (_request_stream == INVALID_STREAM_ID) {
+    if (_request_streams.empty()) {
         CHECK(!has_remote_stream());
         return;
     }
-    SocketUniquePtr ptr;
+    size_t stream_num = _request_streams.size();
+    std::vector<SocketUniquePtr> ptrs(stream_num);
     if (!FailedInline()) {
-        if (Socket::Address(_request_stream, &ptr) != 0) {
-            if (!FailedInline()) {
-                SetFailed(EREQUEST, "Request stream=%" PRIu64 " was closed before responded",
-                                     _request_stream);
-            }
-        } else if (_remote_stream_settings == NULL) {
+        if (_remote_stream_settings == NULL) {
             if (!FailedInline()) {
                 SetFailed(EREQUEST, "The server didn't accept the stream");
+            }
+        } else {
+            for (size_t i = 0; i < stream_num; ++i) {
+                if (Socket::Address(_request_streams[i], &ptrs[i]) != 0) {
+                    if (!FailedInline()) {
+                        SetFailed(EREQUEST, "Request stream=%" PRIu64 " was closed before responded",
+                                  _request_streams[i]);
+                        break;
+                    }
+                }
             }
         }
     }
     if (FailedInline()) {
-        Stream::SetFailed(_request_stream);
+        Stream::SetFailed(_request_streams, _error_code,
+                          "%s", _error_text.c_str());
         if (_remote_stream_settings != NULL) {
             policy::SendStreamRst(host_socket,
                                   _remote_stream_settings->stream_id());
+            for (int i = 0; i < _remote_stream_settings->extra_stream_ids().size(); ++i) {
+                policy::SendStreamRst(host_socket,
+                                      _remote_stream_settings->extra_stream_ids()[i]);
+            }
         }
         return;
     }
-    Stream* s = (Stream*)ptr->conn();
+    Stream* s = (Stream*)ptrs[0]->conn();
     s->SetConnected(_remote_stream_settings);
+    if (stream_num > 1) {
+        const auto& extra_stream_ids = _remote_stream_settings->extra_stream_ids();
+        _remote_stream_settings->clear_extra_stream_ids();
+        for (size_t i = 1; i < stream_num; ++i) {
+            Stream* extra_stream = (Stream *) ptrs[i]->conn();
+            _remote_stream_settings->set_stream_id(extra_stream_ids[i - 1]);
+            s->ShareHostSocket(*extra_stream);
+            extra_stream->SetConnected(_remote_stream_settings);
+        }
+    }
 }
 
 // TODO: Need more security advices from professionals.
@@ -1368,9 +1464,21 @@ void WebEscape(const std::string& source, std::string* output) {
     }
 }
 
+std::string WebEscape(const std::string& source) {
+    std::string output;
+    WebEscape(source, &output);
+    return output;
+}
+
 void Controller::reset_sampled_request(SampledRequest* req) {
     delete _sampled_request;
     _sampled_request = req;
+}
+
+SampledRequest* Controller::release_sampled_request() {
+    SampledRequest* saved_sampled_request = _sampled_request;
+    _sampled_request = NULL;
+    return saved_sampled_request;
 }
 
 void Controller::set_stream_creator(StreamCreator* sc) {
@@ -1454,6 +1562,13 @@ int Controller::GetSockOption(int level, int optname, void* optval, socklen_t* o
     }
 }
 
+void Controller::CallAfterRpcResp(const google::protobuf::Message* req, const google::protobuf::Message* res) {
+    if (_after_rpc_resp_fn) {
+        _after_rpc_resp_fn(this, req, res);
+        _after_rpc_resp_fn = nullptr;
+    }
+}
+
 #if defined(OS_MACOSX)
 typedef sig_t SignalHandler;
 #else
@@ -1485,26 +1600,20 @@ static void RegisterQuitSignalOrDie() {
     SignalHandler prev = signal(SIGINT, quit_handler);
     if (prev != SIG_DFL &&
         prev != SIG_IGN) { // shell may install SIGINT of background jobs with SIG_IGN
-        if (prev == SIG_ERR) {
-            LOG(ERROR) << "Fail to register SIGINT, abort";
-            abort();
-        } else {
-            s_prev_sigint_handler = prev;
-            LOG(WARNING) << "SIGINT was installed with " << prev;
-        }
+        RELEASE_ASSERT_VERBOSE(prev != SIG_ERR,
+                               "Fail to register SIGINT, abort");
+        s_prev_sigint_handler = prev;
+        LOG(WARNING) << "SIGINT was installed with " << prev;
     }
 
     if (FLAGS_graceful_quit_on_sigterm) {
         prev = signal(SIGTERM, quit_handler);
         if (prev != SIG_DFL &&
             prev != SIG_IGN) { // shell may install SIGTERM of background jobs with SIG_IGN
-            if (prev == SIG_ERR) {
-                LOG(ERROR) << "Fail to register SIGTERM, abort";
-                abort();
-            } else {
-                s_prev_sigterm_handler = prev;
-                LOG(WARNING) << "SIGTERM was installed with " << prev;
-            }
+            RELEASE_ASSERT_VERBOSE(prev != SIG_ERR,
+                                   "Fail to register SIGTERM, abort");
+            s_prev_sigterm_handler = prev;
+            LOG(WARNING) << "SIGTERM was installed with " << prev;
         }
     }
 
@@ -1512,13 +1621,10 @@ static void RegisterQuitSignalOrDie() {
         prev = signal(SIGHUP, quit_handler);
         if (prev != SIG_DFL &&
             prev != SIG_IGN) { // shell may install SIGHUP of background jobs with SIG_IGN
-            if (prev == SIG_ERR) {
-                LOG(ERROR) << "Fail to register SIGHUP, abort";
-                abort();
-            } else {
-                s_prev_sighup_handler = prev;
-                LOG(WARNING) << "SIGHUP was installed with " << prev;
-            }
+            RELEASE_ASSERT_VERBOSE(prev != SIG_ERR,
+                                   "Fail to register SIGHUP, abort");
+            s_prev_sighup_handler = prev;
+            LOG(WARNING) << "SIGHUP was installed with " << prev;
         }
     }
 }

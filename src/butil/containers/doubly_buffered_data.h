@@ -253,7 +253,7 @@ template <typename T, typename TLS, bool AllowBthreadSuspended>
 class DoublyBufferedData<T, TLS, AllowBthreadSuspended>::WrapperTLSGroup {
 public:
     const static size_t RAW_BLOCK_SIZE = 4096;
-    const static size_t ELEMENTS_PER_BLOCK = (RAW_BLOCK_SIZE + sizeof(T) - 1) / sizeof(T);
+    const static size_t ELEMENTS_PER_BLOCK = RAW_BLOCK_SIZE / sizeof(Wrapper) > 0 ? RAW_BLOCK_SIZE / sizeof(Wrapper) : 1;
 
     struct BAIDU_CACHELINE_ALIGNMENT ThreadBlock {
         inline DoublyBufferedData::Wrapper* at(size_t offset) {
@@ -331,9 +331,7 @@ private:
     inline static std::deque<WrapperTLSId>& _get_free_ids() {
         if (BAIDU_UNLIKELY(!_s_free_ids)) {
             _s_free_ids = new (std::nothrow) std::deque<WrapperTLSId>();
-            if (!_s_free_ids) {
-                abort();
-            }
+            RELEASE_ASSERT(_s_free_ids);
         }
         return *_s_free_ids;
     }
@@ -361,7 +359,7 @@ __thread std::vector<typename DoublyBufferedData<T, TLS, AllowBthreadSuspended>:
         DoublyBufferedData<T, TLS, AllowBthreadSuspended>::WrapperTLSGroup::_s_tls_blocks = NULL;
 
 template <typename T, typename TLS, bool AllowBthreadSuspended>
-class DoublyBufferedData<T, TLS, AllowBthreadSuspended>::Wrapper
+class BAIDU_CACHELINE_ALIGNMENT DoublyBufferedData<T, TLS, AllowBthreadSuspended>::Wrapper
     : public DoublyBufferedDataWrapperBase<T, TLS> {
 friend class DoublyBufferedData;
 public:
@@ -510,8 +508,8 @@ template <typename T, typename TLS, bool AllowBthreadSuspended>
 DoublyBufferedData<T, TLS, AllowBthreadSuspended>::DoublyBufferedData()
     : _index(0)
     , _wrapper_key(0) {
-    static_assert(!(AllowBthreadSuspended && !IsVoid<TLS>::value),
-                  "Forbidden to allow suspend bthread with non-Void TLS");
+    BAIDU_CASSERT(!(AllowBthreadSuspended && !IsVoid<TLS>::value),
+                  "Forbidden to allow bthread suspended with non-Void TLS");
 
     _wrappers.reserve(64);
     pthread_mutex_init(&_modify_mutex, NULL);

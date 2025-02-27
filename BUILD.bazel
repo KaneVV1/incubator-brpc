@@ -29,7 +29,6 @@ COPTS = [
     "-D__STDC_FORMAT_MACROS",
     "-D__STDC_LIMIT_MACROS",
     "-D__STDC_CONSTANT_MACROS",
-    "-DGFLAGS_NS=google",
 ] + select({
     "//bazel/config:brpc_with_glog": ["-DBRPC_WITH_GLOG=1"],
     "//conditions:default": ["-DBRPC_WITH_GLOG=0"],
@@ -45,13 +44,19 @@ COPTS = [
 }) + select({
     "//bazel/config:brpc_with_rdma": ["-DBRPC_WITH_RDMA=1"],
     "//conditions:default": [""],
+}) + select({
+    "//bazel/config:brpc_with_debug_bthread_sche_safety": ["-DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=1"],
+    "//conditions:default": ["-DBRPC_DEBUG_BTHREAD_SCHE_SAFETY=0"],
+}) + select({
+      "//bazel/config:brpc_with_debug_lock": ["-DBRPC_DEBUG_LOCK=1"],
+      "//conditions:default": ["-DBRPC_DEBUG_LOCK=0"],
 })
 
 LINKOPTS = [
     "-pthread",
     "-ldl",
 ] + select({
-    "@bazel_tools//tools/osx:darwin": [
+    "@bazel_tools//src/conditions:darwin": [
         "-framework CoreFoundation",
         "-framework CoreGraphics",
         "-framework CoreData",
@@ -61,7 +66,10 @@ LINKOPTS = [
         "-Wl,-U,_MallocExtension_ReleaseFreeMemory",
         "-Wl,-U,_ProfilerStart",
         "-Wl,-U,_ProfilerStop",
+        "-Wl,-U,__Z13GetStackTracePPvii",
         "-Wl,-U,_RegisterThriftProtocol",
+        "-Wl,-U,_mallctl",
+        "-Wl,-U,_malloc_stats_print",
     ],
     "//conditions:default": [
         "-lrt",
@@ -117,6 +125,7 @@ BUTIL_SRCS = [
     "src/butil/at_exit.cc",
     "src/butil/atomicops_internals_x86_gcc.cc",
     "src/butil/base64.cc",
+    "src/butil/base64url.cc",
     "src/butil/big_endian.cc",
     "src/butil/cpu.cc",
     "src/butil/debug/alias.cc",
@@ -200,6 +209,7 @@ BUTIL_SRCS = [
     "src/butil/status.cpp",
     "src/butil/string_printf.cpp",
     "src/butil/thread_local.cpp",
+    "src/butil/thread_key.cpp",
     "src/butil/unix_socket.cpp",
     "src/butil/endpoint.cpp",
     "src/butil/fd_utility.cpp",
@@ -210,11 +220,12 @@ BUTIL_SRCS = [
     "src/butil/crc32c.cc",
     "src/butil/containers/case_ignored_flat_map.cpp",
     "src/butil/iobuf.cpp",
+    "src/butil/iobuf_profiler.cpp",
     "src/butil/binary_printer.cpp",
     "src/butil/recordio.cc",
     "src/butil/popen.cpp",
 ] + select({
-    "@bazel_tools//tools/osx:darwin": [
+    "@bazel_tools//src/conditions:darwin": [
         "src/butil/time/time_mac.cc",
         "src/butil/mac/scoped_mach_port.cc",
     ],
@@ -251,6 +262,7 @@ objc_library(
         "src/butil/mac/scoped_cftyperef.h",
         "src/butil/mac/scoped_typeref.h",
         "src/butil/macros.h",
+        "src/butil/string_printf.h",
         "src/butil/memory/aligned_memory.h",
         "src/butil/memory/scoped_policy.h",
         "src/butil/memory/scoped_ptr.h",
@@ -324,14 +336,15 @@ cc_library(
         "@com_github_gflags_gflags//:gflags",
         "@com_github_madler_zlib//:zlib",
         "@com_google_protobuf//:protobuf",
-        "@openssl//:crypto",
-        "@openssl//:ssl",
     ] + select({
         "//bazel/config:brpc_with_glog": ["@com_github_google_glog//:glog"],
         "//conditions:default": [],
     }) + select({
-        "@bazel_tools//tools/osx:darwin": [":macos_lib"],
+        "@bazel_tools//src/conditions:darwin": [":macos_lib"],
         "//conditions:default": [],
+    }) + select({
+        "//bazel/config:brpc_with_boringssl": ["@boringssl//:ssl", "@boringssl//:crypto"],
+        "//conditions:default": ["@openssl//:ssl", "@openssl//:crypto"],
     }),
 )
 
@@ -431,7 +444,7 @@ cc_library(
     deps = [
         ":brpc_idl_options_cc_proto",
         ":butil",
-        "@com_google_protobuf//:protoc_lib",
+        "@com_google_protobuf//src/google/protobuf/compiler:code_generator",
     ],
 )
 

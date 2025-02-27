@@ -15,9 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-
-#include <cstdlib>
-
 #include <string>                               // std::string
 #include <iostream>
 #include <gflags/gflags.h>
@@ -33,6 +30,10 @@
 
 namespace brpc {
 
+DEFINE_bool(allow_chunked_length, false,
+            "Allow both Transfer-Encoding and Content-Length headers are present.");
+DEFINE_bool(allow_http_1_1_request_without_host, true,
+            "Allow HTTP/1.1 request without host which violates the HTTP/1.1 specification.");
 DEFINE_bool(http_verbose, false,
             "[DEBUG] Print EVERY http request/response");
 DEFINE_int32(http_verbose_max_body_length, 512,
@@ -97,20 +98,27 @@ int HttpMessage::on_header_value(http_parser *parser,
             LOG(ERROR) << "Header name is empty";
             return -1;
         }
-        http_message->_cur_value =
-            &http_message->header().GetOrAddHeader(http_message->_cur_header);
+        HttpHeader& header = http_message->header();
+        if (header.CanFoldedInLine(http_message->_cur_header)) {
+            http_message->_cur_value =
+                &header.GetOrAddHeader(http_message->_cur_header);
+        } else {
+            http_message->_cur_value =
+                &header.AddHeader(http_message->_cur_header);
+        }
         if (http_message->_cur_value && !http_message->_cur_value->empty()) {
-            http_message->_cur_value->push_back(',');
+            http_message->_cur_value->append(
+                header.HeaderValueDelimiter(http_message->_cur_header));
         }
     }
     if (http_message->_cur_value) {
         http_message->_cur_value->append(at, length);
     }
     if (FLAGS_http_verbose) {
-        butil::IOBufBuilder* vs = http_message->_vmsgbuilder;
+        butil::IOBufBuilder* vs = http_message->_vmsgbuilder.get();
         if (vs == NULL) {
             vs = new butil::IOBufBuilder;
-            http_message->_vmsgbuilder = vs;
+            http_message->_vmsgbuilder.reset(vs);
             if (parser->type == HTTP_REQUEST) {
                 *vs << "[ HTTP REQUEST @" << butil::my_ip() << " ]\n< "
                     << HttpMethod2Str((HttpMethod)parser->method) << ' '
@@ -135,47 +143,81 @@ int HttpMessage::on_header_value(http_parser *parser,
 int HttpMessage::on_headers_complete(http_parser *parser) {
     HttpMessage *http_message = (HttpMessage *)parser->data;
     http_message->_stage = HTTP_ON_HEADERS_COMPLETE;
-    // Move content-type into the member field.
-    const std::string* content_type = http_message->header().GetHeader("content-type");
-    if (content_type) {
-        http_message->header().set_content_type(*content_type);
-        http_message->header().RemoveHeader("content-type");
-    }
     if (parser->http_major > 1) {
         // NOTE: this checking is a MUST because ProcessHttpResponse relies
         // on it to cast InputMessageBase* into different types.
         LOG(WARNING) << "Invalid major_version=" << parser->http_major;
         parser->http_major = 1;
     }
-    http_message->header().set_version(parser->http_major, parser->http_minor);
+    HttpHeader& headers = http_message->header();
+    headers.set_version(parser->http_major, parser->http_minor);
     // Only for response
     // http_parser may set status_code to 0 when the field is not needed,
     // e.g. in a request. In principle status_code is undefined in a request,
     // but to be consistent and not surprise users, we set it to OK as well.
-    http_message->header().set_status_code(
+    headers.set_status_code(
         !parser->status_code ? HTTP_STATUS_OK : parser->status_code);
     // Only for request
     // method is 0(which is DELETE) for response as well. Since users are
     // unlikely to check method of a response, we don't do anything.
-    http_message->header().set_method(static_cast<HttpMethod>(parser->method));
-    if (parser->type == HTTP_REQUEST &&
-        http_message->header().uri().SetHttpURL(http_message->_url) != 0) {
+    headers.set_method(static_cast<HttpMethod>(parser->method));
+    bool is_http_request = parser->type == HTTP_REQUEST;
+    if (is_http_request && headers.uri().SetHttpURL(http_message->_url) != 0) {
         LOG(ERROR) << "Fail to parse url=`" << http_message->_url << '\'';
         return -1;
     }
-    //rfc2616-sec5.2
+    // https://datatracker.ietf.org/doc/html/rfc2616#section-5.2
     //1. If Request-URI is an absoluteURI, the host is part of the Request-URI.
     //Any Host header field value in the request MUST be ignored.
     //2. If the Request-URI is not an absoluteURI, and the request includes a
     //Host header field, the host is determined by the Host header field value.
     //3. If the host as determined by rule 1 or 2 is not a valid host on the
-    //server, the responce MUST be a 400 error messsage.
-    URI & uri = http_message->header().uri();
+    //server, the responce MUST be a 400 (Bad Request) error messsage.
+    URI& uri = headers.uri();
     if (uri._host.empty()) {
-        const std::string* host_header = http_message->header().GetHeader("host");
+        const std::string* host_header = headers.GetHeader("host");
         if (host_header != NULL) {
             uri.SetHostAndPort(*host_header);
         }
+    }
+
+    // https://datatracker.ietf.org/doc/html/rfc2616#section-14.23
+    // All Internet-based HTTP/1.1 servers MUST respond with a 400 (Bad Request)
+    // status code to any HTTP/1.1 request message which lacks a Host header field.
+    if (uri.host().empty() && is_http_request &&
+        !headers.before_http_1_1() &&
+        !FLAGS_allow_http_1_1_request_without_host) {
+        LOG(ERROR) << "HTTP protocol error: missing host header";
+        return -1;
+    }
+
+    // https://datatracker.ietf.org/doc/html/rfc7230#section-3.3.3
+    // If a message is received with both a Transfer-Encoding and a
+    // Content-Length header field, the Transfer-Encoding overrides the
+    // Content-Length. Such a message might indicate an attempt to
+    // perform request smuggling (Section 9.5) or response splitting
+    // (Section 9.4) and ought to be handled as an error. A sender MUST
+    // remove the received Content-Length field prior to forwarding such
+    // a message.
+
+    // Reject message if both Transfer-Encoding and Content-Length headers
+    // are present or if allowed by gflag and 'Transfer-Encoding'
+    // is chunked - remove Content-Length and serve request.
+    if (parser->uses_transfer_encoding && parser->flags & F_CONTENTLENGTH) {
+        if (parser->flags & F_CHUNKED && FLAGS_allow_chunked_length) {
+            headers.RemoveHeader("Content-Length");
+        } else {
+            LOG(ERROR) << "HTTP protocol error: both Content-Length "
+                       << "and Transfer-Encoding are set.";
+            return -1;
+        }
+    }
+
+    // If server receives a response to a HEAD request, returns 1 and then
+    // the parser will interpret that as saying that this message has no body.
+    if (parser->type == HTTP_RESPONSE &&
+        http_message->request_method() == HTTP_METHOD_HEAD) {
+        return 1;
     }
     return 0;
 }
@@ -223,8 +265,7 @@ int HttpMessage::OnBody(const char *at, const size_t length) {
             // the body is probably streaming data which is too long to print.
             header().status_code() == HTTP_STATUS_OK) {
             LOG(INFO) << '\n' << _vmsgbuilder->buf();
-            delete _vmsgbuilder;
-            _vmsgbuilder = NULL;
+            _vmsgbuilder.reset(NULL);
         } else {
             if (_vbodylen < (size_t)FLAGS_http_verbose_max_body_length) {
                 int plen = std::min(length, (size_t)FLAGS_http_verbose_max_body_length
@@ -288,8 +329,7 @@ int HttpMessage::OnMessageComplete() {
                 - (size_t)FLAGS_http_verbose_max_body_length << " bytes>";
         }
         LOG(INFO) << '\n' << _vmsgbuilder->buf();
-        delete _vmsgbuilder;
-        _vmsgbuilder = NULL;
+        _vmsgbuilder.reset(NULL);
     }
     _cur_header.clear();
     _cur_value = NULL;
@@ -392,15 +432,17 @@ const http_parser_settings g_parser_settings = {
     &HttpMessage::on_message_complete_cb
 };
 
-HttpMessage::HttpMessage(bool read_body_progressively)
+HttpMessage::HttpMessage(bool read_body_progressively,
+                         HttpMethod request_method)
     : _parsed_length(0)
     , _stage(HTTP_ON_MESSAGE_BEGIN)
+    , _request_method(request_method)
     , _read_body_progressively(read_body_progressively)
     , _body_reader(NULL)
     , _cur_value(NULL)
-    , _vmsgbuilder(NULL)
     , _vbodylen(0) {
     http_parser_init(&_parser, HTTP_BOTH);
+    _parser.allow_chunked_length = 1;
     _parser.data = this;
 }
 
@@ -489,6 +531,9 @@ static void DescribeHttpParserFlags(std::ostream& os, unsigned int flags) {
     if (flags & F_SKIPBODY) {
         os << "F_SKIPBODY|";
     }
+    if (flags & F_CONTENTLENGTH) {
+        os << "F_CONTENTLENGTH|";
+    }
 }
 
 std::ostream& operator<<(std::ostream& os, const http_parser& parser) {
@@ -546,11 +591,22 @@ void MakeRawHttpRequest(butil::IOBuf* request,
     uri.PrintWithoutHost(os); // host is sent by "Host" header.
     os << " HTTP/" << h->major_version() << '.'
        << h->minor_version() << BRPC_CRLF;
-    if (h->method() != HTTP_METHOD_GET) {
-        h->RemoveHeader("Content-Length");
-        // Never use "Content-Length" set by user.
+    // Never use "Content-Length" set by user.
+    h->RemoveHeader("Content-Length");
+    const std::string* transfer_encoding = h->GetHeader("Transfer-Encoding");
+    if (h->method() == HTTP_METHOD_GET) {
+        h->RemoveHeader("Transfer-Encoding");
+    } else if (!transfer_encoding) {
+        // https://datatracker.ietf.org/doc/html/rfc7230#section-3.3.2
+        // A sender MUST NOT send a Content-Length header field in any message
+        // that contains a Transfer-Encoding header field.
         os << "Content-Length: " << (content ? content->length() : 0)
            << BRPC_CRLF;
+    }
+    // `Expect: 100-continue' is not supported, remove it.
+    const std::string* expect = h->GetHeader("Expect");
+    if (expect && *expect == "100-continue") {
+        h->RemoveHeader("Expect");
     }
     //rfc 7230#section-5.4:
     //A client MUST send a Host header field in all HTTP/1.1 request
@@ -559,7 +615,7 @@ void MakeRawHttpRequest(butil::IOBuf* request,
     //empty field-value.
     //rfc 7231#sec4.3:
     //the request-target consists of only the host name and port number of 
-    //the tunnel destination, seperated by a colon. For example,
+    //the tunnel destination, separated by a colon. For example,
     //Host: server.example.com:80
     if (h->GetHeader("host") == NULL) {
         os << "Host: ";
@@ -620,14 +676,49 @@ void MakeRawHttpResponse(butil::IOBuf* response,
     os << "HTTP/" << h->major_version() << '.'
        << h->minor_version() << ' ' << h->status_code()
        << ' ' << h->reason_phrase() << BRPC_CRLF;
-    if (content) {
+    bool is_invalid_content = h->status_code() < HTTP_STATUS_OK ||
+                              h->status_code() == HTTP_STATUS_NO_CONTENT;
+    bool is_head_req = h->method() == HTTP_METHOD_HEAD;
+    if (is_invalid_content) {
+        // https://www.rfc-editor.org/rfc/rfc7230#section-3.3.1
+        // A server MUST NOT send a Transfer-Encoding header field in any
+        // response with a status code of 1xx (Informational) or 204 (No
+        // Content).
+        h->RemoveHeader("Transfer-Encoding");
+        // https://www.rfc-editor.org/rfc/rfc7230#section-3.3.2
+        // A server MUST NOT send a Content-Length header field in any response
+        // with a status code of 1xx (Informational) or 204 (No Content).
         h->RemoveHeader("Content-Length");
-        // Never use "Content-Length" set by user.
-        // Always set Content-Length since lighttpd requires the header to be
-        // set to 0 for empty content.
-        os << "Content-Length: " << content->length() << BRPC_CRLF;
+    } else {
+        const std::string* transfer_encoding = h->GetHeader("Transfer-Encoding");
+        // https://datatracker.ietf.org/doc/html/rfc7230#section-3.3.2
+        // A sender MUST NOT send a Content-Length header field in any message
+        // that contains a Transfer-Encoding header field.
+        if (transfer_encoding) {
+            h->RemoveHeader("Content-Length");
+        }
+        if (content) {
+            const std::string* content_length = h->GetHeader("Content-Length");
+            if (is_head_req) {
+                if (!content_length && !transfer_encoding) {
+                    // Prioritize "Content-Length" set by user.
+                    // If "Content-Length" is not set, set it to the length of content.
+                    os << "Content-Length: " << content->length() << BRPC_CRLF;
+                }
+            } else {
+                if (!transfer_encoding) {
+                    if (content_length) {
+                        h->RemoveHeader("Content-Length");
+                    }
+                    // Never use "Content-Length" set by user.
+                    // Always set Content-Length since lighttpd requires the header to be
+                    // set to 0 for empty content.
+                    os << "Content-Length: " << content->length() << BRPC_CRLF;
+                }
+            }
+        }
     }
-    if (!h->content_type().empty()) {
+    if (!is_invalid_content && !h->content_type().empty()) {
         os << "Content-Type: " << h->content_type()
            << BRPC_CRLF;
     }
@@ -637,7 +728,12 @@ void MakeRawHttpResponse(butil::IOBuf* response,
     }
     os << BRPC_CRLF;  // CRLF before content
     os.move_to(*response);
-    if (content) {
+
+    // https://datatracker.ietf.org/doc/html/rfc7231#section-4.3.2
+    // The HEAD method is identical to GET except that the server MUST NOT
+    // send a message body in the response (i.e., the response terminates at
+    // the end of the header section).
+    if (!is_invalid_content && !is_head_req && content) {
         response->append(butil::IOBuf::Movable(*content));
     }
 }

@@ -15,20 +15,29 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <stdio.h>
-int main() {
-#if defined(__clang__)
-    const int major_v = __GNUC__;
-    int minor_v = __GNUC_MINOR__;
-    if (major_v == 4 && minor_v <= 8) {
-        // Make version of clang >= 4.8 so that it's not rejected by config_brpc.sh
-        minor_v = 8;
+#include "brpc/details/hpack.h"
+#include "butil/logging.h"
+
+#define kMinInputLength 5
+#define kMaxInputLength 1024
+
+extern "C" int
+LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+    if (size < kMinInputLength || size > kMaxInputLength){
+        return 1;
     }
-    printf("%d\n", (major_v * 10000 + minor_v * 100));
-#elif defined(__GNUC__)
-    printf("%d\n", (__GNUC__ * 10000 + __GNUC_MINOR__ * 100 + __GNUC_PATCHLEVEL__));
-#else
-    printf("0\n");
-#endif
+
+    std::string input(reinterpret_cast<const char*>(data), size);
+
+    butil::IOBuf buf;
+    brpc::HPacker p2;
+    brpc::HPacker::Header h2;
+
+    p2.Init(4096);
+    buf.append(input);
+
+    p2.Decode(&buf, &h2);
+
     return 0;
 }

@@ -140,7 +140,9 @@ void IndexService::default_method(::google::protobuf::RpcController* controller,
            << (!IsHeapProfilerEnabled() ? " (disabled)" : "") << NL
            << Path("/hotspots/growth", html_addr)
            << " : Profiling growth of heap"
-           << (!IsHeapProfilerEnabled() ? " (disabled)" : "") << NL;
+           << (!IsHeapProfilerEnabled() ? " (disabled)" : "") << NL
+           << Path("/hotspots/contention", html_addr)
+           << " : Profiling contention of lock" << NL;
     }
     os << "curl -H 'Content-Type: application/json' -d 'JSON' ";
     if (butil::is_endpoint_extended(server->listen_address())) {
@@ -163,7 +165,8 @@ void IndexService::default_method(::google::protobuf::RpcController* controller,
        << Path("/threads", html_addr) << " : Check pstack"
        << (!FLAGS_enable_threads_service ? " (disabled)" : "") << NL
        << Path("/dir", html_addr) << " : Browse directories and files"
-       << (!FLAGS_enable_dir_service ? " (disabled)" : "") << NL;
+       << (!FLAGS_enable_dir_service ? " (disabled)" : "") << NL
+       << Path("/memory", html_addr) << " : Get malloc allocator information" << NL;
     if (use_html) {
         os << "</body></html>";
     }

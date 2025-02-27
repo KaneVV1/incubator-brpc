@@ -61,6 +61,8 @@ message VLogRequest {}
 message VLogResponse {}
 message MetricsRequest {}
 message MetricsResponse {}
+message MemoryRequest {}
+message MemoryResponse {}
 message BadMethodRequest {
     required string service_name = 1;
 }
@@ -147,6 +149,8 @@ service hotspots {
     rpc growth_non_responsive(HotspotsRequest) returns (HotspotsResponse);
     rpc contention(HotspotsRequest) returns (HotspotsResponse);
     rpc contention_non_responsive(HotspotsRequest) returns (HotspotsResponse);
+    rpc iobuf(HotspotsRequest) returns (HotspotsResponse);
+    rpc iobuf_non_responsive(HotspotsRequest) returns (HotspotsResponse);
 }
 
 service flags {
@@ -168,4 +172,8 @@ service rpcz {
 
 service dir {
     rpc default_method(DirRequest) returns (DirResponse);
+}
+
+service memory {
+    rpc default_method(MemoryRequest) returns (MemoryResponse);
 }

@@ -33,20 +33,20 @@ protoc运行后会生成echo.pb.cc和echo.pb.h文件，你得include echo.pb.h�
 ```c++
 #include "echo.pb.h"
 ...
-class MyEchoService : public EchoService  {
+class MyEchoService : public EchoService {
 public:
-    void Echo(::google::protobuf::RpcController* cntl_base,
-              const ::example::EchoRequest* request,
-              ::example::EchoResponse* response,
-              ::google::protobuf::Closure* done) {
-        // 这个对象确保在return时自动调用done->Run()
-        brpc::ClosureGuard done_guard(done);
-         
-        brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
- 
-        // 填写response
-        response->set_message(request->message());
-    }
+    void Echo(::google::protobuf::RpcController* cntl_base,
+              const ::example::EchoRequest* request,
+              ::example::EchoResponse* response,
+              ::google::protobuf::Closure* done) {
+        // 这个对象确保在return时自动调用done->Run()
+        brpc::ClosureGuard done_guard(done);
+         
+        brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
+ 
+        // 填写response
+        response->set_message(request->message());
+    }
 };
 ```
 
@@ -87,26 +87,26 @@ brpc::ClosureGuard done_guard(done);
 一般来说，同步Service和异步Service分别按如下代码处理done：
 
 ```c++
-class MyFooService: public FooService  {
+class MyFooService: public FooService {
 public:
-    // 同步服务
-    void SyncFoo(::google::protobuf::RpcController* cntl_base,
-                 const ::example::EchoRequest* request,
-                 ::example::EchoResponse* response,
-                 ::google::protobuf::Closure* done) {
-         brpc::ClosureGuard done_guard(done);
-         ...
-    }
- 
-    // 异步服务
-    void AsyncFoo(::google::protobuf::RpcController* cntl_base,
-                  const ::example::EchoRequest* request,
-                  ::example::EchoResponse* response,
-                  ::google::protobuf::Closure* done) {
-         brpc::ClosureGuard done_guard(done);
-         ...
-         done_guard.release();
-    }
+    // 同步服务
+    void SyncFoo(::google::protobuf::RpcController* cntl_base,
+                 const ::example::EchoRequest* request,
+                 ::example::EchoResponse* response,
+                 ::google::protobuf::Closure* done) {
+         brpc::ClosureGuard done_guard(done);
+         ...
+    }
+ 
+    // 异步服务
+    void AsyncFoo(::google::protobuf::RpcController* cntl_base,
+                  const ::example::EchoRequest* request,
+                  ::example::EchoResponse* response,
+                  ::google::protobuf::Closure* done) {
+         brpc::ClosureGuard done_guard(done);
+         ...
+         done_guard.release();
+    }
 };
 ```
 
@@ -116,18 +116,18 @@ ClosureGuard的接口如下：
 // RAII: Call Run() of the closure on destruction.
 class ClosureGuard {
 public:
-    ClosureGuard();
-    // Constructed with a closure which will be Run() inside dtor.
-    explicit ClosureGuard(google::protobuf::Closure* done);
-    
-    // Call Run() of internal closure if it's not NULL.
-    ~ClosureGuard();
- 
-    // Call Run() of internal closure if it's not NULL and set it to `done'.
-    void reset(google::protobuf::Closure* done);
- 
-    // Set internal closure to NULL and return the one before set.
-    google::protobuf::Closure* release();
+    ClosureGuard();
+    // Constructed with a closure which will be Run() inside dtor.
+    explicit ClosureGuard(google::protobuf::Closure* done);
+    
+    // Call Run() of internal closure if it's not NULL.
+    ~ClosureGuard();
+ 
+    // Call Run() of internal closure if it's not NULL and set it to `done'.
+    void reset(google::protobuf::Closure* done);
+ 
+    // Set internal closure to NULL and return the one before set.
+    google::protobuf::Closure* release();
 };
 ```
 
@@ -192,8 +192,8 @@ int AddService(google::protobuf::Service* service, ServiceOwnership ownership);
 brpc::Server server;
 MyEchoService my_echo_service;
 if (server.AddService(&my_echo_service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
-    LOG(FATAL) << "Fail to add my_echo_service";
-    return -1;
+    LOG(FATAL) << "Fail to add my_echo_service";
+    return -1;
 }
 ```
 
@@ -207,7 +207,7 @@ Server启动后你无法再修改其中的Service。
 int Start(const char* ip_and_port_str, const ServerOptions* opt);
 int Start(EndPoint ip_and_port, const ServerOptions* opt);
 int Start(int port, const ServerOptions* opt);
-int Start(const char *ip_str, PortRange port_range, const ServerOptions *opt);  // r32009后增加
+int Start(const char *ip_str, PortRange port_range, const ServerOptions *opt);  // r32009后增加
 ```
 
 合法的`ip_and_port_str`：
@@ -221,7 +221,7 @@ int Start(const char *ip_str, PortRange port_range, const ServerOptions *opt); 
 `options`为NULL时所有参数取默认值，如果你要使用非默认值，这么做就行了：
 
 ```c++
-brpc::ServerOptions options;  // 包含了默认值
+brpc::ServerOptions options;  // 包含了默认值
 options.xxx = yyy;
 ...
 server.Start(..., &options);
@@ -253,7 +253,7 @@ RunUntilAskedToQuit()函数可以在大部分情况下简化server的运转和�
 ```c++
 // Wait until Ctrl-C is pressed, then Stop() and Join() the server.
 server.RunUntilAskedToQuit();
- 
+ 
 // server已经停止了，这里可以写释放资源的代码。
 ```
 
@@ -519,8 +519,8 @@ struct ServerSSLOptions {
     // will be used.
     // Default: false
     bool strict_sni;
- 
-    // ... Other options
+ 
+    // ... Other options
 };
 ```
 
@@ -533,6 +533,13 @@ struct ServerSSLOptions {
   ```
 
 - 其余选项还包括：密钥套件选择（推荐密钥ECDHE-RSA-AES256-GCM-SHA384，chrome默认第一优先密钥，安全性很高，但比较耗性能）、session复用等。
+
+- 如果想支持应用层协议协商，可通过`alpns`选项设置Server端支持的协议字符串，在Server启动时会校验协议的有效性，多个协议间使用逗号分割。具体使用方式如下：
+
+  ```c++
+  ServerSSLOptions ssl_options;
+  ssl_options.alpns = "http, h2, baidu_std";
+  ```
 
 - SSL层在协议层之下（作用在Socket层），即开启后，所有协议（如HTTP）都支持用SSL加密后传输到Server，Server端会先进行SSL解密后，再把原始数据送到各个协议中去。
 
@@ -906,7 +913,7 @@ Session-local和server-thread-local对大部分server已经够用。不过在一
 // associated is NULL when the key is destroyed.
 // Returns 0 on success, error code otherwise.
 extern int bthread_key_create(bthread_key_t* key, void (*destructor)(void* data));
- 
+ 
 // Delete a key previously returned by bthread_key_create().
 // It is the responsibility of the application to free the data related to
 // the deleted key in any running thread. No destructor is invoked by
@@ -914,7 +921,7 @@ extern int bthread_key_create(bthread_key_t* key, void (*destructor)(void* data)
 // will no longer be called upon thread exit.
 // Returns 0 on success, error code otherwise.
 extern int bthread_key_delete(bthread_key_t key);
- 
+ 
 // Store `data' in the thread-specific slot identified by `key'.
 // bthread_setspecific() is callable from within destructor. If the application
 // does so, destructors will be repeatedly called for at most
@@ -929,7 +936,7 @@ extern int bthread_key_delete(bthread_key_t key);
 // Returns 0 on success, error code otherwise.
 // If the key is invalid or deleted, return EINVAL.
 extern int bthread_setspecific(bthread_key_t key, void* data);
- 
+ 
 // Return current value of the thread-specific slot identified by `key'.
 // If bthread_setspecific() had not been called in the thread, return NULL.
 // If the key is invalid or deleted, return NULL.
@@ -1005,6 +1012,68 @@ public:
         }
         ...
 ```
+
+## RPC Protobuf message factory
+
+Server默认使用`DefaultRpcPBMessageFactory`。它是一个简单的工厂类，通过`new`来创建请求/响应message和`delete`来销毁请求/响应message。
+
+如果用户希望自定义创建销毁机制，可以实现`RpcPBMessages`（请求/响应message的封装）和`RpcPBMessageFactory`（工厂类），并设置`ServerOptions.rpc_pb_message_factory`为自定义的`RpcPBMessageFactory`。注意：server启动后，server拥有了`RpcPBMessageFactory`的所有权。
+
+接口如下：
+
+```c++
+// Inherit this class to customize rpc protobuf messages,
+// include request and response.
+class RpcPBMessages {
+public:
+    virtual ~RpcPBMessages() = default;
+    // Get protobuf request message.
+    virtual google::protobuf::Message* Request() = 0;
+    // Get protobuf response message.
+    virtual google::protobuf::Message* Response() = 0;
+};
+
+// Factory to manage `RpcPBMessages'.
+class RpcPBMessageFactory {
+public:
+    virtual ~RpcPBMessageFactory() = default;
+
+    // Get `RpcPBMessages' according to `service' and `method'.
+    // Common practice to create protobuf message:
+    // service.GetRequestPrototype(&method).New() -> request;
+    // service.GetResponsePrototype(&method).New() -> response.
+    virtual RpcPBMessages* Get(const ::google::protobuf::Service& service,
+                               const ::google::protobuf::MethodDescriptor& method) = 0;
+    // Return `RpcPBMessages' to factory.
+    virtual void Return(RpcPBMessages* messages) = 0;
+};
+```
+
+### Protobuf arena
+
+Protobuf arena是一种Protobuf message内存管理机制，有着提高内存分配效率、减少内存碎片、对缓存友好等优点。详细信息见[C++ Arena Allocation Guide](https://protobuf.dev/reference/cpp/arenas/)。
+
+如果用户希望使用protobuf arena来管理Protobuf message内存，可以设置`ServerOptions.rpc_pb_message_factory = brpc::GetArenaRpcPBMessageFactory();`，使用默认的`start_block_size`（256 bytes）和`max_block_size`（8192 bytes）来创建arena。用户可以调用`brpc::GetArenaRpcPBMessageFactory<StartBlockSize, MaxBlockSize>();`自定义arena大小。
+
+注意：从Protobuf v3.14.0开始，[默认开启arena](https://github.com/protocolbuffers/protobuf/releases/tag/v3.14.0https://github.com/protocolbuffers/protobuf/releases/tag/v3.14.0)。但是Protobuf v3.14.0之前的版本，用户需要再proto文件中加上选项：`option cc_enable_arenas = true;`，所以为了兼容性，可以统一都加上该选项。
+
+## server端忽略eovercrowded
+### server级别忽略eovercrowded
+设置ServerOptions.ignore_eovercrowded，默认值0代表不忽略
+
+### method级别忽略eovercrowded
+server.IgnoreEovercrowdedOf("...") = ...可设置method级别的ignore_eovercrowded。也可以通过设置ServerOptions.ignore_eovercrowded一次性为所有的method设置忽略eovercrowded。
+
+```c++
+ServerOptions.ignore_eovercrowded = true;                   // Set the default ignore_eovercrowded for all methods
+server.IgnoreEovercrowdedOf("example.EchoService.Echo") = true;
+```
+
+此设置一般**发生在AddService后，server启动前**。当设置失败时（比如对应的method不存在），server会启动失败同时提示用户修正IgnoreEovercrowdedOf设置错误。
+
+当ServerOptions.ignore_eovercrowded和server.IgnoreEovercrowdedOf("...")=...同时被设置时，任何一个设置为true，就表示会忽略eovercrowded。
+
+注意：没有service级别的ignore_eovercrowded。
 
 # FAQ
 

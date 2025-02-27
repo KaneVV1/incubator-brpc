@@ -23,7 +23,7 @@ include config.mk
 # 2. Removed -Werror: Not block compilation for non-vital warnings, especially when the
 #    code is tested on newer systems. If the code is used in production, add -Werror back
 CPPFLAGS+=-DBTHREAD_USE_FAST_PTHREAD_MUTEX -D_GNU_SOURCE -DUSE_SYMBOLIZE -DNO_TCMALLOC -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -DNDEBUG -DBRPC_REVISION=\"$(shell ./tools/get_brpc_revision.sh .)\"
-CXXFLAGS=$(CPPFLAGS) -O2 -pipe -Wall -W -fPIC -fstrict-aliasing -Wno-invalid-offsetof -Wno-unused-parameter -fno-omit-frame-pointer -std=c++0x
+CXXFLAGS+=$(CPPFLAGS) -O2 -pipe -Wall -W -fPIC -fstrict-aliasing -Wno-invalid-offsetof -Wno-unused-parameter -fno-omit-frame-pointer
 CFLAGS=$(CPPFLAGS) -O2 -pipe -Wall -W -fPIC -fstrict-aliasing -Wno-unused-parameter -fno-omit-frame-pointer
 DEBUG_CXXFLAGS = $(filter-out -DNDEBUG,$(CXXFLAGS)) -DUNIT_TEST -DBVAR_NOT_LINK_DEFAULT_VARIABLES
 DEBUG_CFLAGS = $(filter-out -DNDEBUG,$(CFLAGS)) -DUNIT_TEST
@@ -68,6 +68,7 @@ BUTIL_SOURCES = \
     src/butil/at_exit.cc \
     src/butil/atomicops_internals_x86_gcc.cc \
     src/butil/base64.cc \
+    src/butil/base64url.cc \
     src/butil/big_endian.cc \
     src/butil/cpu.cc \
     src/butil/debug/alias.cc \
@@ -151,6 +152,7 @@ BUTIL_SOURCES = \
     src/butil/status.cpp \
     src/butil/string_printf.cpp \
     src/butil/thread_local.cpp \
+    src/butil/thread_key.cpp \
     src/butil/unix_socket.cpp \
     src/butil/endpoint.cpp \
     src/butil/fd_utility.cpp \
@@ -161,6 +163,7 @@ BUTIL_SOURCES = \
     src/butil/crc32c.cc \
     src/butil/containers/case_ignored_flat_map.cpp \
     src/butil/iobuf.cpp \
+    src/butil/iobuf_profiler.cpp \
     src/butil/binary_printer.cpp \
     src/butil/recordio.cc \
     src/butil/popen.cpp
@@ -241,9 +244,9 @@ clean_debug:
 protoc-gen-mcpack: src/idl_options.pb.cc src/mcpack2pb/generator.o libbrpc.a
 	@echo "> Linking $@"
 ifeq ($(SYSTEM),Linux)
-	$(CXX) -o $@ $(CXXFLAGS) $(HDRPATHS) $(LIBPATHS) -std=c++0x -Xlinker "-(" $^ -Wl,-Bstatic $(STATIC_LINKINGS) -Wl,-Bdynamic -Xlinker "-)" $(DYNAMIC_LINKINGS)
+	$(CXX) -o $@ $(CXXFLAGS) $(HDRPATHS) $(LIBPATHS) -Xlinker "-(" $^ -Wl,-Bstatic $(STATIC_LINKINGS) -Wl,-Bdynamic -Xlinker "-)" $(DYNAMIC_LINKINGS)
 else ifeq ($(SYSTEM),Darwin)
-	$(CXX) -o $@ $(CXXFLAGS) $(HDRPATHS) $(LIBPATHS) -std=c++0x $^ $(STATIC_LINKINGS) $(DYNAMIC_LINKINGS)
+	$(CXX) -o $@ $(CXXFLAGS) $(HDRPATHS) $(LIBPATHS) $^ $(STATIC_LINKINGS) $(DYNAMIC_LINKINGS)
 endif
 
 # force generation of pb headers before compiling to avoid fail-to-import issues in compiling pb.cc

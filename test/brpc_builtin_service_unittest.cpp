@@ -50,9 +50,12 @@
 #include "brpc/builtin/bthreads_service.h"     // BthreadsService
 #include "brpc/builtin/ids_service.h"          // IdsService
 #include "brpc/builtin/sockets_service.h"      // SocketsService
+#include "brpc/builtin/memory_service.h"
 #include "brpc/builtin/common.h"
 #include "brpc/builtin/bad_method_service.h"
 #include "echo.pb.h"
+#include "brpc/grpc_health_check.pb.h"
+#include "json2pb/pb_to_json.h"
 
 DEFINE_bool(foo, false, "Flags for UT");
 BRPC_VALIDATE_GFLAG(foo, brpc::PassValidate);
@@ -552,6 +555,73 @@ TEST_F(BuiltinServiceTest, customized_health) {
     EXPECT_EQ("i'm ok", cntl.response_attachment());
 }
 
+class MyGrpcHealthReporter : public brpc::HealthReporter {
+public:
+    void GenerateReport(brpc::Controller* cntl,
+                        google::protobuf::Closure* done) {
+        grpc::health::v1::HealthCheckResponse response;
+        response.set_status(grpc::health::v1::HealthCheckResponse_ServingStatus_UNKNOWN);
+
+        if (cntl->response()) {
+            cntl->response()->CopyFrom(response);
+        } else {
+            std::string json;
+            json2pb::ProtoMessageToJson(response, &json);
+            cntl->http_response().set_content_type("application/json");
+            cntl->response_attachment().append(json);
+        }
+        done->Run();
+    }
+};
+
+TEST_F(BuiltinServiceTest, normal_grpc_health) {
+    brpc::ServerOptions opt;
+    ASSERT_EQ(0, _server.Start(9798, &opt));
+
+    grpc::health::v1::HealthCheckResponse response;
+    grpc::health::v1::HealthCheckRequest request;
+    request.set_service("grpc_req_from_brpc");
+    brpc::Controller cntl;
+    brpc::ChannelOptions copt;
+    copt.protocol = "h2:grpc";
+    brpc::Channel chan;
+    ASSERT_EQ(0, chan.Init("127.0.0.1:9798", &copt));
+    grpc::health::v1::Health_Stub stub(&chan);
+    stub.Check(&cntl, &request, &response, NULL);
+    EXPECT_FALSE(cntl.Failed()) << cntl.ErrorText();
+    EXPECT_EQ(response.status(), grpc::health::v1::HealthCheckResponse_ServingStatus_SERVING);
+
+    response.Clear();
+    brpc::Controller cntl1;
+    cntl1.http_request().uri() = "/grpc.health.v1.Health/Check";
+    chan.CallMethod(NULL, &cntl1, &request, &response, NULL);
+    EXPECT_FALSE(cntl.Failed()) << cntl.ErrorText();
+    EXPECT_EQ(response.status(), grpc::health::v1::HealthCheckResponse_ServingStatus_SERVING);
+}
+
+TEST_F(BuiltinServiceTest, customized_grpc_health) {
+    brpc::ServerOptions opt;
+    MyGrpcHealthReporter hr;
+    opt.health_reporter = &hr;
+    ASSERT_EQ(0, _server.Start(9798, &opt));
+
+    grpc::health::v1::HealthCheckResponse response;
+    grpc::health::v1::HealthCheckRequest request;
+    request.set_service("grpc_req_from_brpc");
+    brpc::Controller cntl;
+
+    brpc::ChannelOptions copt;
+    copt.protocol = "h2:grpc";
+    brpc::Channel chan;
+    ASSERT_EQ(0, chan.Init("127.0.0.1:9798", &copt));
+
+    grpc::health::v1::Health_Stub stub(&chan);
+    stub.Check(&cntl, &request, &response, NULL);
+
+    EXPECT_FALSE(cntl.Failed()) << cntl.ErrorText();
+    EXPECT_EQ(response.status(), grpc::health::v1::HealthCheckResponse_ServingStatus_UNKNOWN);
+}
+
 TEST_F(BuiltinServiceTest, status) {
     TestStatus(false);
     TestStatus(true);
@@ -767,6 +837,17 @@ void* dummy_bthread(void*) {
     return NULL;
 }
 
+
+#ifdef BRPC_BTHREAD_TRACER
+bool g_bthread_trace_stop = false;
+void* bthread_trace(void*) {
+    while (!g_bthread_trace_stop) {
+        bthread_usleep(1000 * 100);
+    }
+    return NULL;
+}
+#endif // BRPC_BTHREAD_TRACER
+
 TEST_F(BuiltinServiceTest, bthreads) {
     brpc::BthreadsService service;
     brpc::BthreadsRequest req;
@@ -797,7 +878,25 @@ TEST_F(BuiltinServiceTest, bthreads) {
         service.default_method(&cntl, &req, &res, &done);
         EXPECT_FALSE(cntl.Failed());
         CheckContent(cntl, "stop=0");
-    }    
+    }
+
+#ifdef BRPC_BTHREAD_TRACER
+    {
+        bthread_t th;
+        EXPECT_EQ(0, bthread_start_background(&th, NULL, bthread_trace, NULL));
+        ClosureChecker done;
+        brpc::Controller cntl;
+        std::string id_string;
+        butil::string_printf(&id_string, "%llu?st=1", (unsigned long long)th);
+        cntl.http_request().uri().SetHttpURL("/bthreads/" + id_string);
+        cntl.http_request()._unresolved_path = id_string;
+        service.default_method(&cntl, &req, &res, &done);
+        g_bthread_trace_stop = true;
+        EXPECT_FALSE(cntl.Failed());
+        CheckContent(cntl, "stop=0");
+        CheckContent(cntl, "bthread_trace");
+    }
+#endif // BRPC_BTHREAD_TRACER
 }
 
 TEST_F(BuiltinServiceTest, sockets) {
@@ -832,4 +931,22 @@ TEST_F(BuiltinServiceTest, sockets) {
         EXPECT_FALSE(cntl.Failed());
         CheckContent(cntl, "fd=-1");
     }    
+}
+
+TEST_F(BuiltinServiceTest, memory) {
+    brpc::MemoryService service;
+    brpc::MemoryRequest req;
+    brpc::MemoryResponse res;
+    brpc::Controller cntl;
+    ClosureChecker done;
+    service.default_method(&cntl, &req, &res, &done);
+    EXPECT_FALSE(cntl.Failed());
+    CheckContent(cntl, "generic.current_allocated_bytes");
+    CheckContent(cntl, "generic.heap_size");
+    CheckContent(cntl, "tcmalloc.current_total_thread_cache_bytes");
+    CheckContent(cntl, "tcmalloc.central_cache_free_bytes");
+    CheckContent(cntl, "tcmalloc.transfer_cache_free_bytes");
+    CheckContent(cntl, "tcmalloc.thread_cache_free_bytes");
+    CheckContent(cntl, "tcmalloc.pageheap_free_bytes");
+    CheckContent(cntl, "tcmalloc.pageheap_unmapped_bytes");
 }
